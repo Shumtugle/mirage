@@ -4,7 +4,10 @@ import android.annotation.SuppressLint;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
@@ -14,6 +17,8 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -53,7 +58,8 @@ final class CameraEngine {
 
     interface Listener {
         void onOpened(Size previewSize);
-        void onSaved(boolean ok);
+        void onExposure(long exposureNs, int iso, float aperture);
+        void onSaved(boolean ok, Uri uri, Bitmap thumb);
         void onError(String message);
     }
 
@@ -66,7 +72,7 @@ final class CameraEngine {
             CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT,
             CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT,
     };
-    static final String[] WB_LABELS = {"AWB", "SUN", "CLOUD", "LAMP", "TUBE"};
+    static final String[] WB_LABELS = {"Auto", "Daylight", "Cloudy", "Lamp", "Fluorescent"};
 
     private final Context context;
     private final Listener listener;
@@ -98,6 +104,9 @@ final class CameraEngine {
     private volatile float ev = 0f;
     private volatile int wb = 0;
     private volatile int deviceRotation = 0;
+    private volatile int lastJpegRotation = 0;
+    private long lastExposurePost;
+    private String info = "";
 
     CameraEngine(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -178,6 +187,7 @@ final class CameraEngine {
             chars = manager.getCameraCharacteristics(id);
             readCapabilities();
             chooseSizes();
+            describe(id);
             manager.openCamera(id, deviceCallback, handler);
         } catch (CameraAccessException e) {
             fail(e.getMessage());
@@ -240,6 +250,61 @@ final class CameraEngine {
         sensorOrientation = so == null ? 90 : so;
         int[] af = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
         afModes = af == null ? new int[0] : af;
+    }
+
+    /** Plain lines about the camera that was opened: what it gives an ordinary app. */
+    String info() {
+        return info;
+    }
+
+    int photoMegapixels() {
+        if (jpegSize == null) return 0;
+        return Math.round(jpegSize.getWidth() * (float) jpegSize.getHeight() / 1e6f);
+    }
+
+    private void describe(String id) {
+        StringBuilder s = new StringBuilder();
+        s.append("Camera ").append(id);
+        int[] caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        boolean logical = contains(caps, CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
+        s.append(logical ? ", several lenses behind one camera" : ", one lens").append('\n');
+        s.append("Photo: ").append(sizeText(jpegSize)).append('\n');
+        Size array = chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE);
+        s.append("Sensor, usual mode: ").append(sizeText(array)).append('\n');
+        s.append("Full resolution for this app: ").append(fullResolution(chars)).append('\n');
+        if (logical && Build.VERSION.SDK_INT >= 28) {
+            for (String pid : chars.getPhysicalCameraIds()) {
+                try {
+                    CameraCharacteristics pc = manager.getCameraCharacteristics(pid);
+                    s.append("  lens ").append(pid).append(": ").append(fullResolution(pc)).append('\n');
+                } catch (Exception ignored) {
+                    s.append("  lens ").append(pid).append(": hidden").append('\n');
+                }
+            }
+        }
+        if (zoomRange != null) {
+            s.append(String.format(Locale.US, "Zoom: %.1f\u00d7 to %.1f\u00d7", zoomRange.getLower(), zoomRange.getUpper()));
+        } else {
+            s.append(String.format(Locale.US, "Zoom: crop up to %.1f\u00d7", maxDigitalZoom));
+        }
+        info = s.toString();
+    }
+
+    /** Whether the sensor offers its full, unbinned resolution, and how big that is. */
+    private static String fullResolution(CameraCharacteristics c) {
+        if (Build.VERSION.SDK_INT < 31) return "not offered (Android 11 and older)";
+        int[] caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        if (!contains(caps, CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR)) {
+            return "not offered";
+        }
+        Size full = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+        return "offered, " + sizeText(full);
+    }
+
+    private static String sizeText(Size s) {
+        if (s == null) return "unknown";
+        return s.getWidth() + "\u00d7" + s.getHeight() + String.format(Locale.US, " (%.0f MP)",
+                s.getWidth() * (double) s.getHeight() / 1e6);
     }
 
     private void chooseSizes() {
@@ -321,7 +386,7 @@ final class CameraEngine {
                 previewBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                 previewBuilder.addTarget(previewSurface);
                 applyControls(previewBuilder);
-                session.setRepeatingRequest(previewBuilder.build(), null, handler);
+                session.setRepeatingRequest(previewBuilder.build(), previewCallback, handler);
                 final Size size = previewSize;
                 main.post(new Runnable() {
                     @Override public void run() {
@@ -336,6 +401,26 @@ final class CameraEngine {
         }
         @Override public void onConfigureFailed(CameraCaptureSession s) {
             fail("Session failed");
+        }
+    };
+
+    /** Reports what the camera actually chose for the preview, a few times a second. */
+    private final CameraCaptureSession.CaptureCallback previewCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult result) {
+            long now = System.currentTimeMillis();
+            if (now - lastExposurePost < 400) return;
+            lastExposurePost = now;
+            Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+            Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+            Float ap = result.get(CaptureResult.LENS_APERTURE);
+            final long e = exp == null ? 0 : exp;
+            final int i = iso == null ? 0 : iso;
+            final float a = ap == null ? 0f : ap;
+            main.post(new Runnable() {
+                @Override public void run() {
+                    listener.onExposure(e, i, a);
+                }
+            });
         }
     };
 
@@ -374,7 +459,7 @@ final class CameraEngine {
                 if (session == null || previewBuilder == null) return;
                 try {
                     applyControls(previewBuilder);
-                    session.setRepeatingRequest(previewBuilder.build(), null, h);
+                    session.setRepeatingRequest(previewBuilder.build(), previewCallback, h);
                 } catch (CameraAccessException ignored) {
                     // Session is closing; the next open applies the state anyway.
                 } catch (IllegalStateException ignored) {
@@ -394,13 +479,14 @@ final class CameraEngine {
                     CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
                     b.addTarget(jpegReader.getSurface());
                     applyControls(b);
-                    b.set(CaptureRequest.JPEG_ORIENTATION, (sensorOrientation + deviceRotation) % 360);
+                    lastJpegRotation = (sensorOrientation + deviceRotation) % 360;
+                    b.set(CaptureRequest.JPEG_ORIENTATION, lastJpegRotation);
                     b.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
                     session.capture(b.build(), null, h);
                 } catch (CameraAccessException e) {
-                    saved(false);
+                    saved(null, null);
                 } catch (IllegalStateException e) {
-                    saved(false);
+                    saved(null, null);
                 }
             }
         });
@@ -419,24 +505,41 @@ final class CameraEngine {
         } finally {
             img.close();
         }
-        saved(save(bytes));
+        Uri uri = save(bytes);
+        saved(uri, uri == null ? null : thumbnail(bytes, lastJpegRotation));
     }
 
-    private void saved(final boolean ok) {
+    private void saved(final Uri uri, final Bitmap thumb) {
         main.post(new Runnable() {
             @Override public void run() {
-                listener.onSaved(ok);
+                listener.onSaved(uri != null, uri, thumb);
             }
         });
     }
 
-    private boolean save(byte[] jpeg) {
+    /** A small upright copy of the photo for the last-shot button. */
+    static Bitmap thumbnail(byte[] jpeg, int rotation) {
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, o);
+        int sample = 1;
+        while (Math.min(o.outWidth, o.outHeight) / (sample * 2) >= 256) sample *= 2;
+        o = new BitmapFactory.Options();
+        o.inSampleSize = sample;
+        Bitmap b = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, o);
+        if (b == null || rotation == 0) return b;
+        Matrix m = new Matrix();
+        m.postRotate(rotation);
+        return Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+    }
+
+    private Uri save(byte[] jpeg) {
         String name = "IMG_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date()) + ".jpg";
         return Build.VERSION.SDK_INT >= 29 ? saveScoped(name, jpeg) : saveLegacy(name, jpeg);
     }
 
     /** Android 10 and newer: the media store owns the file, no storage permission needed. */
-    private boolean saveScoped(String name, byte[] jpeg) {
+    private Uri saveScoped(String name, byte[] jpeg) {
         ContentResolver cr = context.getContentResolver();
         ContentValues v = new ContentValues();
         v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
@@ -444,7 +547,7 @@ final class CameraEngine {
         v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/" + FOLDER);
         v.put(MediaStore.Images.Media.IS_PENDING, 1);
         Uri uri = cr.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v);
-        if (uri == null) return false;
+        if (uri == null) return null;
         OutputStream out = null;
         try {
             out = cr.openOutputStream(uri);
@@ -455,19 +558,19 @@ final class CameraEngine {
         } catch (Exception e) {
             closeQuietly(out);
             cr.delete(uri, null, null);
-            return false;
+            return null;
         }
         v.clear();
         v.put(MediaStore.Images.Media.IS_PENDING, 0);
         cr.update(uri, v, null, null);
-        return true;
+        return uri;
     }
 
     /** Android 9 and older: a plain file in the camera folder, then a media scan. */
     @SuppressWarnings("deprecation")
-    private boolean saveLegacy(String name, byte[] jpeg) {
+    private Uri saveLegacy(String name, byte[] jpeg) {
         File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), FOLDER);
-        if (!dir.isDirectory() && !dir.mkdirs()) return false;
+        if (!dir.isDirectory() && !dir.mkdirs()) return null;
         File f = new File(dir, name);
         FileOutputStream out = null;
         try {
@@ -478,10 +581,20 @@ final class CameraEngine {
         } catch (Exception e) {
             closeQuietly(out);
             f.delete();
-            return false;
+            return null;
         }
-        MediaScannerConnection.scanFile(context, new String[]{f.getPath()}, new String[]{"image/jpeg"}, null);
-        return true;
+        // Register the file so galleries see it and other apps can open it by a content address.
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
+        v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+        v.put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis());
+        v.put(MediaStore.Images.Media.DATA, f.getPath());
+        try {
+            return context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+        } catch (Exception e) {
+            MediaScannerConnection.scanFile(context, new String[]{f.getPath()}, new String[]{"image/jpeg"}, null);
+            return Uri.fromFile(f);
+        }
     }
 
     // -------------------------------------------------------------- helpers
@@ -501,6 +614,7 @@ final class CameraEngine {
     }
 
     private static boolean contains(int[] a, int v) {
+        if (a == null) return false;
         for (int x : a) if (x == v) return true;
         return false;
     }

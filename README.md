@@ -11,9 +11,14 @@ Project page: https://shumtugle.github.io/mirage/
 - Press and hold a preset: save the current settings into it, make it the default,
   rename, delete.
 - `+` at the end of the row adds a preset from the current settings.
-- Pinch to zoom, double tap to return to the default preset.
-- `−` / `+` change exposure, the right button cycles white balance.
+- Pinch to zoom, double tap to return to the default preset, hold the picture
+  to show or hide the rule-of-thirds grid.
+- `−` / `+` beside the shutter change exposure, the ringed button on the right
+  cycles white balance.
 - Shutter: the round button, the hardware camera key or either volume key.
+- The ring on the left shows the last photo; tap it to open the photo.
+- The app's sign at the top opens a card with the camera's facts: photo size,
+  sensor size, and whether the full sensor resolution is open to the app.
 
 Photos go to `DCIM/Mirage`.
 
@@ -52,4 +57,5 @@ Android 8 or newer. See `RELEASE.md` for releases.
 
 ## Licence
 
-0BSD, see `LICENSE`.
+0BSD, see `LICENSE`. The fonts in `assets/fonts` are under the SIL Open Font
+License; see `assets/licenses/fonts.ofl`.

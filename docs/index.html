@@ -6,37 +6,50 @@
 <title>Mirage</title>
 <link rel="icon" href="icon.png">
 <style>
-  :root { --bg: #101418; --panel: #181e24; --ink: #e8e2d6; --dim: #8f948f; --amber: #e0a84a; --edge: #2a3138; }
+  @font-face { font-family: Display; src: url(fonts/display.ttf); }
+  @font-face { font-family: Text; src: url(fonts/text.ttf); }
+  :root { --bg: #120d09; --panel: #21170f; --raised: #31221a; --ink: #f3e7cf; --dim: #cdb8a0;
+          --amber: #e0a84a; --edge: #4a3426; --accent: #b83a2b; --accent-text: #e8826c; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
-         font: 16px/1.55 system-ui, sans-serif; }
+         font: 16px/1.55 Text, system-ui, sans-serif; }
   main { max-width: 760px; margin: 0 auto; padding: 28px 18px 56px; }
   header { display: flex; gap: 18px; align-items: center; }
   header img { width: 80px; height: 80px; }
-  h1 { margin: 0; font-size: 32px; letter-spacing: 1px; }
+  h1 { margin: 0; font: 44px/1 Display, serif; letter-spacing: .5px; }
   .tag { margin: 2px 0 0; color: var(--dim); }
   h2 { color: var(--amber); font-size: 17px; margin: 36px 0 10px; }
   .live { display: grid; grid-template-columns: auto 1fr; gap: 26px; align-items: start; margin: 30px 0; }
   @media (max-width: 640px) { .live { grid-template-columns: 1fr; justify-items: center; } }
-  .phone { width: 300px; border: 3px solid var(--edge); border-radius: 22px; background: #000;
+  .phone { width: 300px; border: 1px solid var(--edge); border-radius: 26px; background: var(--bg); padding-top: 10px;
            overflow: hidden; position: relative; user-select: none; touch-action: none; }
-  .view { width: 300px; height: 400px; position: relative; overflow: hidden; background: #000; }
+  .view { width: 276px; height: 368px; margin: 0 auto; position: relative; overflow: hidden; background: #000; border-radius: 20px; }
+  .grid { position: absolute; inset: 0; pointer-events: none;
+          background:
+            linear-gradient(90deg, transparent calc(33.333% - .5px), rgba(243,231,207,.42) 0 calc(33.333% + .5px), transparent 0 calc(66.666% - .5px), rgba(243,231,207,.42) 0 calc(66.666% + .5px), transparent 0),
+            linear-gradient(180deg, transparent calc(33.333% - .5px), rgba(243,231,207,.42) 0 calc(33.333% + .5px), transparent 0 calc(66.666% - .5px), rgba(243,231,207,.42) 0 calc(66.666% + .5px), transparent 0); }
+  .grid.off { display: none; }
   .view canvas, .view video { position: absolute; inset: 0; width: 100%; height: 100%;
            object-fit: cover; transform-origin: 50% 50%; }
   .tint { position: absolute; inset: 0; mix-blend-mode: soft-light; pointer-events: none; }
-  .zoom { position: absolute; top: 12px; left: 0; right: 0; text-align: center; font-size: 20px;
-          text-shadow: 0 1px 4px #000; pointer-events: none; }
-  .panel { background: rgba(0,0,0,.6); padding: 10px 10px 16px; }
+  .zoom { position: absolute; top: 10px; left: 14px; font: 34px/1 Display, serif;
+          text-shadow: 0 1px 6px #000; pointer-events: none; }
+  .panel { padding: 12px 10px 16px; }
   .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
-  .chip { flex: none; border: 1px solid var(--ink); border-radius: 18px; padding: 6px 14px;
-          background: transparent; color: var(--ink); font: inherit; font-size: 15px; }
-  .chip.on { background: var(--amber); border-color: var(--amber); color: #000; }
+  .chips { justify-content: center; }
+  .chip { flex: none; border: 1px solid var(--edge); border-radius: 18px; padding: 6px 16px;
+          background: rgba(33,23,15,.6); color: var(--ink); font: inherit; font-size: 15px; }
+  .chip.on { background: var(--raised); border: 1.5px solid var(--amber); }
   .row { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
-  .round { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--ink);
-           background: transparent; color: var(--ink); font: inherit; font-size: 18px; }
-  .wb { width: 52px; height: 52px; font-size: 12px; }
-  .shutter { width: 68px; height: 68px; border-radius: 50%; background: var(--ink);
-             border: 4px solid var(--amber); }
+  .round { width: 42px; height: 42px; border-radius: 50%; border: 0;
+           background: var(--raised); color: var(--ink); font: inherit; font-size: 20px; }
+  .wb { width: 52px; height: 52px; font-size: 11px; background: rgba(33,23,15,.6);
+        border: 2px solid var(--accent-text); color: var(--accent-text); }
+  .shutter { width: 72px; height: 72px; border-radius: 50%; border: 0; padding: 5px;
+             background: conic-gradient(from 200deg, #f1cf86, #b07a2c, #f6dea2, #a06d24, #f1cf86); }
+  .shutter::before { content: ""; display: block; width: 100%; height: 100%; border-radius: 50%;
+             background: radial-gradient(circle at 42% 35%, #d65a46, var(--accent) 60%, #8e2a1e);
+             box-shadow: 0 0 0 4px var(--bg); }
   .ev { min-width: 64px; text-align: center; font-size: 14px; }
   .src { margin-top: 10px; font-size: 14px; color: var(--dim); }
   .src button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--edge);
@@ -64,6 +77,7 @@
           <canvas id="scene" width="600" height="800"></canvas>
           <video id="cam" playsinline muted hidden></video>
           <div class="tint" id="tint"></div>
+          <div class="grid" id="grid"></div>
           <div class="zoom" id="zoom">2.0&times;</div>
         </div>
         <div class="panel">
@@ -81,8 +95,8 @@
     </div>
     <div>
       <p>The same controls as the app. Tap a preset, pinch or drag on the picture to
-      zoom, double tap to return to the default preset, press and hold a preset to
-      save the current settings into it.</p>
+      zoom, double tap to return to the default preset, press and hold the picture to
+      show or hide the thirds grid, press and hold a preset to save the current settings into it.</p>
       <p>Here the browser enlarges the picture after the fact. The app asks the
       camera itself for the zoom, before the picture is made.</p>
       <p>Your camera stays on your device: the page has no server and sends nothing.</p>
@@ -95,6 +109,9 @@
       never hops to the wide-angle lens.</li>
     <li>Opens straight at the default preset, 2&times; out of the box: the first frame is already zoomed.</li>
     <li>Presets hold zoom, exposure and white balance. Add, rename, delete, pick the default.</li>
+    <li>A rule-of-thirds grid over the viewfinder; hold the picture to hide it.</li>
+    <li>Tap the app's sign at the top to see what the camera offers: photo size, sensor size,
+      and whether the full sensor resolution is open to the app.</li>
     <li>Shutter on screen, on the hardware camera key, or on either volume key.</li>
     <li>Photos go to the camera folder, <code>DCIM/Mirage</code>.</li>
     <li>No network, no accounts, no libraries. Android 8 and newer.</li>
@@ -111,7 +128,7 @@
 
 <script>
 (function () {
-  var WB = ["AWB", "SUN", "CLOUD", "LAMP", "TUBE"];
+  var WB = ["AUTO", "SUN", "CLOUD", "LAMP", "TUBE"];
   // soft-light tints that move the picture the way each white balance mode would
   var TINT = ["transparent", "rgba(120,170,255,.35)", "rgba(110,150,255,.5)",
               "rgba(90,140,255,.75)", "rgba(255,120,200,.35)"];
@@ -213,13 +230,24 @@
   };
 
   // pinch with two fingers, drag up/down with one, double tap for the default
-  var pts = {}, startDist = 0, startZoom = 2, lastY = null, lastTap = 0;
+  var pts = {}, startDist = 0, startZoom = 2, lastY = null, lastTap = 0, holdTimer = null;
   view.addEventListener("pointerdown", function (e) {
     view.setPointerCapture(e.pointerId);
     pts[e.pointerId] = e;
     var ids = Object.keys(pts);
     if (ids.length === 2) { startDist = dist(); startZoom = state.zoom; lastY = null; }
     else { lastY = e.clientY; }
+    clearTimeout(holdTimer);
+    if (ids.length === 1) {
+      var sx = e.clientX, sy = e.clientY;
+      holdTimer = setTimeout(function () {
+        if (Object.keys(pts).length !== 1) return;
+        var p = pts[Object.keys(pts)[0]];
+        if (Math.hypot(p.clientX - sx, p.clientY - sy) > 10) return;
+        document.getElementById("grid").classList.toggle("off");
+        lastY = null;
+      }, 600);
+    }
     var now = Date.now();
     if (ids.length === 1 && now - lastTap < 300) {
       for (var i = 0; i < presets.length; i++) if (presets[i].def) select(presets[i]);
@@ -232,7 +260,7 @@
     if (Object.keys(pts).length === 2) { state.zoom = startZoom * dist() / startDist; apply(); }
     else if (lastY !== null) { state.zoom *= Math.pow(1.01, lastY - e.clientY); lastY = e.clientY; apply(); }
   });
-  function up(e) { delete pts[e.pointerId]; lastY = null; }
+  function up(e) { delete pts[e.pointerId]; lastY = null; clearTimeout(holdTimer); }
   view.addEventListener("pointerup", up);
   view.addEventListener("pointercancel", up);
   function dist() {
