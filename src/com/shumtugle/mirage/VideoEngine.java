@@ -43,8 +43,11 @@ import java.util.Locale;
  * when it offers one for that size; otherwise an ordinary recording session
  * at the fastest rate it allows, and the diary says so.
  *
- * The recorder draws from one lasting surface, so the session is built once
- * and each clip only brings a fresh recorder to it.
+ * In the high-speed session the recorder draws from one lasting surface, so
+ * the session is built once and each clip only brings a fresh recorder to it.
+ * The ordinary session does not feed such a surface on every phone; there
+ * each clip gets its own recorder and the session is rebuilt around it, and
+ * rebuilt back to the preview alone when the clip ends.
  *
  * Steady trades speed for a calm picture: an ordinary session at up to 60
  * frames, where the phone's own stabilisation, optical and electronic, may
@@ -84,10 +87,14 @@ final class VideoEngine {
     private Range<Integer> recordFps;
 
     private MediaRecorder recorder;
+    /** The recorder's own surface, for a clip in the ordinary session. */
+    private Surface clipSurface;
     private ParcelFileDescriptor out;
     private Uri outUri;
     private File outFile;
     private volatile boolean recording;
+    /** A clip asked for but not yet running: the session is being rebuilt for it. */
+    private volatile boolean starting;
     private long started;
 
     private volatile float zoom = 2f;
@@ -130,6 +137,10 @@ final class VideoEngine {
 
     boolean recording() {
         return recording;
+    }
+
+    boolean starting() {
+        return starting;
     }
 
     long elapsedMs() {
@@ -295,6 +306,12 @@ final class VideoEngine {
         try {
             st.setDefaultBufferSize(WIDTH, HEIGHT);
             preview = new Surface(st);
+            if (!highSpeed) {
+                previewSurface = preview;
+                recorderSurface = null;
+                d.createCaptureSession(Arrays.asList(preview), sessionCallback, handler);
+                return;
+            }
             rec = MediaCodec.createPersistentInputSurface();
             // The lasting surface takes its size from a recorder prepared once; this one never records.
             File dummy = new File(context.getCacheDir(), "warmup.mp4");
@@ -378,7 +395,7 @@ final class VideoEngine {
         if (session == null || device == null) return;
         CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
         b.addTarget(previewSurface);
-        if (toRecorder) b.addTarget(recorderSurface);
+        if (toRecorder) b.addTarget(highSpeed ? recorderSurface : clipSurface);
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, toRecorder ? recordFps : previewFps);
@@ -504,6 +521,7 @@ final class VideoEngine {
     }
 
     private MediaRecorder newRecorder(boolean sound, Surface input) throws Exception {
+        // In the ordinary session the recorder keeps its own surface: no input surface is set.
         MediaRecorder r = Build.VERSION.SDK_INT >= 31 ? new MediaRecorder(context) : new MediaRecorder();
         if (sound) r.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         r.setVideoSource(MediaRecorder.VideoSource.SURFACE);
@@ -518,17 +536,21 @@ final class VideoEngine {
             r.setAudioChannels(2);
             r.setAudioEncodingBitRate(192000);
         }
-        r.setInputSurface(input);
+        if (input != null) r.setInputSurface(input);
         return r;
     }
 
     /** Starts a clip; rotation is how the phone is held, in degrees, as for photos. */
     void start(final int deviceRotation) {
         final Handler h = handler;
-        if (h == null || recording) return;
+        if (h == null || recording || starting) return;
+        starting = true;
         h.post(new Runnable() {
             @Override public void run() {
-                if (session == null || recording) return;
+                if (session == null || recording) {
+                    starting = false;
+                    return;
+                }
                 String name = "VID_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
                         .format(new java.util.Date()) + ".mp4";
                 try {
@@ -540,11 +562,48 @@ final class VideoEngine {
                     else recorder.setOutputFile(outFile.getPath());
                     recorder.prepare();
                     loggedResult = false;
+                    failuresLogged = 0;
+                    if (!highSpeed) {
+                        // Rebuild the session around this recorder's own surface; it starts once configured.
+                        clipSurface = recorder.getSurface();
+                        final String clip = name;
+                        final int turn = (sensorOrientation + deviceRotation) % 360;
+                        final boolean withS = sound;
+                        device.createCaptureSession(Arrays.asList(previewSurface, clipSurface),
+                                new CameraCaptureSession.StateCallback() {
+                                    @Override public void onConfigured(CameraCaptureSession s) {
+                                        session = s;
+                                        try {
+                                            repeat(true);
+                                            recorder.start();
+                                            started = System.currentTimeMillis();
+                                            recording = true;
+                                            starting = false;
+                                            h.postDelayed(watchFrames, 1500);
+                                            Journal.line(context, String.format(Locale.US,
+                                                    "RECORD start %s: %dx%d at %d fps, ordinary, own surface, zoom %.1f, sound %s, turn %d",
+                                                    clip, WIDTH, HEIGHT, fps(), zoom, withS, turn));
+                                        } catch (Exception e) {
+                                            Journal.error(context, "record start", e);
+                                            abandon();
+                                            previewOnly();
+                                            fail("Recording did not start");
+                                        }
+                                    }
+                                    @Override public void onConfigureFailed(CameraCaptureSession s) {
+                                        Journal.line(context, "RECORD session for the clip failed");
+                                        abandon();
+                                        previewOnly();
+                                        fail("Recording did not start");
+                                    }
+                                }, h);
+                        return;
+                    }
                     repeat(true);
                     recorder.start();
                     started = System.currentTimeMillis();
                     recording = true;
-                    failuresLogged = 0;
+                    starting = false;
                     h.postDelayed(watchFrames, 1500);
                     Journal.line(context, String.format(Locale.US,
                             "RECORD start %s: %dx%d at %d fps, %s, zoom %.1f, sound %s, turn %d",
@@ -593,6 +652,10 @@ final class VideoEngine {
             // already gone
         }
         recorder = null;
+        if (!highSpeed) {
+            clipSurface = null;
+            previewOnly();
+        }
         final Uri uri = finishOutput(ok);
         Journal.line(context, "RECORD stop after " + ms + " ms, " + (ok ? "saved " + uri : "nothing kept"));
         final boolean saved = ok && uri != null;
@@ -670,8 +733,20 @@ final class VideoEngine {
         return null;
     }
 
+    /** Back to the preview alone, in the ordinary session. */
+    private void previewOnly() {
+        if (device == null || previewSurface == null) return;
+        try {
+            device.createCaptureSession(Arrays.asList(previewSurface), sessionCallback, handler);
+        } catch (Exception e) {
+            Journal.error(context, "preview session", e);
+        }
+    }
+
     private void abandon() {
         recording = false;
+        starting = false;
+        clipSurface = null;
         if (recorder != null) {
             try { recorder.release(); } catch (RuntimeException ignored) { }
             recorder = null;

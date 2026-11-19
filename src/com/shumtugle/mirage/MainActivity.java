@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.3";
+    static final String VERSION = "0.4.4";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -537,6 +537,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             engine.capture();
             return;
         }
+        if (videoEngine.starting()) return;
         if (videoEngine.recording()) {
             videoEngine.stop();
             shutterButton.setRecording(false);
@@ -558,7 +559,13 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private final Runnable timer = new Runnable() {
         @Override public void run() {
             if (!videoEngine.recording()) {
+                if (videoEngine.starting()) {
+                    main.postDelayed(this, 150);
+                    return;
+                }
                 updateLabels();
+                if (shutterButton != null) shutterButton.setRecording(false);
+                setControlsEnabled(true);
                 return;
             }
             long s = videoEngine.elapsedMs() / 1000;

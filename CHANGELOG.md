@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.4
+
+- Steady records: in the ordinary session each clip now gets its own
+  recorder and the session is rebuilt around it, because the lasting
+  recorder surface that serves the high-speed session got no frames there.
+  Starting a steady clip takes a moment longer.
+
 ## 0.4.3
 
 - Steady finds what the phone can carry: when recording gets no frames with
