@@ -30,6 +30,7 @@ The light and geometry of the variants are the same code as in the author's
 photo editor: `Light`, `Upright`, `Pose` and `Warp` are copies of its files.
 
 Photos go to `Pictures/Mirage`, and so do the variants, each as soon as it is ready.
+A diary of each day, plain text, goes to `Documents/Mirage`.
 
 ## Main lens only
 

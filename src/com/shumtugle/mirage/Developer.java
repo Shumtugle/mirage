@@ -95,23 +95,40 @@ final class Developer {
     void develop(final CameraEngine.Shot shot) {
         worker.execute(new Runnable() {
             @Override public void run() {
+                long t0 = System.currentTimeMillis();
                 try {
                     process(shot);
+                    log("DEVELOP done in " + (System.currentTimeMillis() - t0) + " ms");
                 } catch (OutOfMemoryError e) {
+                    Journal.error(context, "develop, out of memory (heap " + heap() + ")", e);
                     finishRoll();
                 } catch (RuntimeException e) {
+                    Journal.error(context, "develop", e);
                     finishRoll();
                 }
             }
         });
     }
 
+    private void log(String text) {
+        Journal.line(context, text);
+    }
+
+    private static String heap() {
+        Runtime r = Runtime.getRuntime();
+        return ((r.totalMemory() - r.freeMemory()) >> 20) + " of " + (r.maxMemory() >> 20) + " MB";
+    }
+
     private void process(CameraEngine.Shot shot) {
         // 1. The shot itself, cut to the frame when the camera could not.
         byte[] original = shot.jpeg;
         Bitmap full = null;
+        log("DEVELOP shot of " + shot.jpeg.length + " bytes, tag turns it " + Saver.exifRotation(shot.jpeg)
+                + " degrees, lens " + Math.round(shot.lens35) + " mm, heap " + heap());
         if (shot.cut != null) {
             full = Saver.upright(shot.jpeg, 1);
+            log("CUT after the shot: picture " + (full == null ? "not decoded" : full.getWidth() + "x" + full.getHeight())
+                    + ", frame " + shot.cut.toShortString());
             if (full != null) {
                 Bitmap cut = cut(full, shot.cut);
                 if (cut != full) full.recycle();
@@ -121,6 +138,7 @@ final class Developer {
         }
         String name = Saver.name(null);
         final Uri uri = Saver.save(context, name, original);
+        log("SAVED " + name + " -> " + uri);
         if (uri == null) {
             main.post(new Runnable() {
                 @Override public void run() {
@@ -159,6 +177,7 @@ final class Developer {
             return;
         }
         int w = full.getWidth(), h = full.getHeight();
+        log("PICTURE " + w + "x" + h + " upright, heap " + heap());
         double k = Math.min(1.0, READING / (double) Math.max(w, h));
         Bitmap small = Bitmap.createScaledBitmap(full, Math.max(8, (int) Math.round(w * k)),
                 Math.max(8, (int) Math.round(h * k)), true);
@@ -168,6 +187,11 @@ final class Developer {
         Light bright = new Light();
         bright.auto(small, BRIGHT);
         small.recycle();
+        log(String.format(java.util.Locale.US,
+                "READ lines: %d segments, level %s, upright %s, square %s; light fix br %.1f co %.1f ga %.1f te %.1f, "
+                        + "bright br %.1f co %.1f ga %.1f te %.1f",
+                lines.segments, lines.level != null, lines.upright != null, lines.square != null,
+                fix.br, fix.co, fix.ga, fix.te, bright.br, bright.co, bright.ga, bright.te));
 
         Pose level = null;
         if (lines.level != null) {
@@ -200,6 +224,7 @@ final class Developer {
             roll.add(v);
         }
         notifyRoll();
+        long t0 = System.currentTimeMillis();
         Bitmap out = null;
         try {
             Bitmap lit = full;
@@ -211,6 +236,7 @@ final class Developer {
             if (pose != null && !pose.plain()) {
                 Pose.Laid laid = pose.lay(lit.getWidth(), lit.getHeight());
                 if (laid == null) {
+                    log("VARIANT " + label + ": the turn is too steep, skipped");
                     if (lit != full) lit.recycle();
                     synchronized (this) {
                         roll.remove(v);
@@ -225,6 +251,8 @@ final class Developer {
             String fileName = stem + "_" + suffix + ".jpg";
             v.file = writeCache(fileName, bytes);
             v.kept = Saver.save(context, fileName, bytes);
+            log("VARIANT " + label + ": " + out.getWidth() + "x" + out.getHeight() + ", " + bytes.length + " bytes, "
+                    + (System.currentTimeMillis() - t0) + " ms -> " + v.kept);
         } finally {
             if (out != null && out != full) out.recycle();
         }

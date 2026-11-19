@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.3.1";
+    static final String VERSION = "0.3.2";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -107,8 +107,14 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Palette.load(this);
+        watchForCrash();
         float widthDp = getResources().getDisplayMetrics().widthPixels / getResources().getDisplayMetrics().density;
         k = Math.min(1f, (widthDp - 8f) / 416f);
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        Journal.line(this, String.format(Locale.US,
+                "START Mirage %s on %s %s, Android %s (API %d); screen %dx%d px, density %.3f, %.0f dp wide, row scale %.3f",
+                VERSION, Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
+                dm.widthPixels, dm.heightPixels, dm.density, widthDp, k));
         prefs = getSharedPreferences("mirage", MODE_PRIVATE);
 
         store = new PresetStore(this);
@@ -171,9 +177,23 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         return need.toArray(new String[0]);
     }
 
+    /** The last words of a crash go into the diary before the process ends. */
+    private void watchForCrash() {
+        final Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override public void uncaughtException(Thread t, Throwable e) {
+                java.io.StringWriter s = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(s));
+                Journal.get(MainActivity.this).writeNow("CRASH in " + t.getName() + ": " + s.toString().trim());
+                if (before != null) before.uncaughtException(t, e);
+            }
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         if (code != REQ_PERMS) return;
+        Journal.line(this, "PERMISSIONS " + java.util.Arrays.toString(perms) + " -> " + java.util.Arrays.toString(results));
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Camera permission needed", Toast.LENGTH_LONG).show();
             finish();
@@ -488,6 +508,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     private void saveFrame() {
         android.graphics.RectF f = engine.frameInView();
+        Journal.line(this, "FRAME moved to " + f.toShortString());
         prefs.edit().putFloat(PREF_FRAME_X, f.centerX()).putFloat(PREF_FRAME_Y, f.centerY()).apply();
     }
 
@@ -537,6 +558,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void select(Preset p) {
+        Journal.line(this, String.format(Locale.US, "PRESET %s: zoom %.2f, ev %.2f, wb %d", p.name, p.zoom, p.ev, p.wb));
         active = p;
         engine.applyPreset(p);
         refreshPresets();
@@ -770,7 +792,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         box.addView(hint);
 
         TextView version = text(12.5f, Palette.HINT);
-        version.setText("Mirage " + VERSION);
+        version.setText("Mirage " + VERSION + " \u00b7 diary in Documents/Mirage");
         version.setPadding(0, dp(14), 0, dp(10));
         box.addView(version);
 
@@ -851,6 +873,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     @Override
     public void onError(String message) {
+        Journal.line(this, "ERROR shown: " + message);
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 

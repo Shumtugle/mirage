@@ -1,5 +1,13 @@
 # Changes
 
+## 0.3.2
+
+- A diary: one plain text file a day in `Documents/Mirage`, with every camera
+  of the phone as it describes itself, the chosen camera, every tap, lock,
+  preset and frame move, every shot with its path, crop and turns, what the
+  camera says it did, the darkroom's readings and timings, and every error,
+  a crash included.
+
 ## 0.3.1
 
 - Everything is saved by itself: the shot and every variant as soon as it is

@@ -85,6 +85,9 @@ final class CameraEngine {
 
     private final Listener listener;
     private final CameraManager manager;
+    private final Context context;
+    private int lastAfState = -1;
+    private long shotStarted;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private HandlerThread thread;
@@ -133,6 +136,7 @@ final class CameraEngine {
 
     CameraEngine(Context context, Listener listener) {
         this.listener = listener;
+        this.context = context.getApplicationContext();
         this.manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
     }
 
@@ -178,6 +182,10 @@ final class CameraEngine {
         focusX = x;
         focusY = y;
         locked = lock;
+        MeteringRectangle[] at = spot(x, y);
+        log(String.format(Locale.US, "%s at view (%.3f, %.3f) -> region %s; AF auto %s, AF regions %d, AE regions %d",
+                lock ? "LOCK" : "FOCUS", x, y, at == null ? "none" : at[0].toString(),
+                contains(afModes, CameraMetadata.CONTROL_AF_MODE_AUTO), maxAfRegions, maxAeRegions));
         final Handler h = handler;
         if (h == null) return;
         h.post(new Runnable() {
@@ -205,6 +213,7 @@ final class CameraEngine {
 
     /** Gives focus and exposure back to the camera. */
     void releaseFocus() {
+        log("FOCUS released, camera chooses again");
         focusX = -1f;
         focusY = -1f;
         locked = false;
@@ -279,18 +288,87 @@ final class CameraEngine {
                 fail("No rear camera");
                 return;
             }
+            survey();
             chars = manager.getCameraCharacteristics(id);
             readCapabilities();
             chooseSizes();
             describe(id);
+            log("OPEN camera " + id + "\n" + info + String.format(Locale.US,
+                    "\nchosen photo %s, preview %s, sensor orientation %d, active array %s, cropping %s",
+                    jpegSize, previewSize, sensorOrientation, activeArray, freeformCrop ? "freeform" : "centre only"));
             manager.openCamera(id, deviceCallback, handler);
         } catch (CameraAccessException e) {
+            Journal.error(context, "open", e);
             fail(e.getMessage());
         } catch (SecurityException e) {
+            Journal.error(context, "open", e);
             fail(e.getMessage());
         } catch (IllegalArgumentException e) {
+            Journal.error(context, "open", e);
             fail(e.getMessage());
         }
+    }
+
+    /** Every camera of the phone, as it describes itself to an ordinary app. */
+    private void survey() {
+        try {
+            StringBuilder s = new StringBuilder("CAMERAS of this phone");
+            for (String cid : manager.getCameraIdList()) {
+                CameraCharacteristics c = manager.getCameraCharacteristics(cid);
+                s.append("\n--- camera ").append(cid);
+                Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+                s.append(" facing ").append(facing == null ? "?" : facing == CameraCharacteristics.LENS_FACING_BACK
+                        ? "back" : facing == CameraCharacteristics.LENS_FACING_FRONT ? "front" : "external");
+                s.append("\n focal ").append(Arrays.toString(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)));
+                s.append(" mm, apertures ").append(Arrays.toString(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)));
+                s.append("\n sensor ").append(c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)).append(" mm, pixels ")
+                        .append(c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)).append(", active ")
+                        .append(c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
+                        .append(", orientation ").append(c.get(CameraCharacteristics.SENSOR_ORIENTATION));
+                s.append("\n capabilities ").append(Arrays.toString(c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)));
+                Integer level = c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL);
+                s.append(", hardware level ").append(level);
+                if (Build.VERSION.SDK_INT >= 28) s.append("\n physical ").append(c.getPhysicalCameraIds());
+                if (Build.VERSION.SDK_INT >= 30) s.append("\n zoom ratio ").append(c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE));
+                s.append(", max digital zoom ").append(c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM));
+                s.append(", cropping type ").append(c.get(CameraCharacteristics.SCALER_CROPPING_TYPE));
+                s.append("\n AF modes ").append(Arrays.toString(c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)))
+                        .append(", regions AF/AE/AWB ").append(c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF)).append('/')
+                        .append(c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE)).append('/')
+                        .append(c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AWB));
+                s.append("\n noise modes ").append(Arrays.toString(c.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)))
+                        .append(", edge modes ").append(Arrays.toString(c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)));
+                StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                if (map != null) s.append("\n JPEG sizes ").append(firstSizes(map.getOutputSizes(ImageFormat.JPEG)));
+                if (Build.VERSION.SDK_INT >= 31) {
+                    StreamConfigurationMap max = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+                    if (max != null) {
+                        s.append("\n JPEG sizes at full resolution ").append(firstSizes(max.getOutputSizes(ImageFormat.JPEG)));
+                        s.append("\n RAW sizes at full resolution ").append(firstSizes(max.getOutputSizes(ImageFormat.RAW_SENSOR)));
+                    }
+                    s.append("\n pixel array at full resolution ")
+                            .append(c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION));
+                }
+            }
+            log(s.toString());
+        } catch (Exception e) {
+            Journal.error(context, "survey", e);
+        }
+    }
+
+    private static String firstSizes(Size[] sizes) {
+        if (sizes == null) return "none";
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < sizes.length && i < 6; i++) {
+            if (i > 0) s.append(' ');
+            s.append(sizes[i]);
+        }
+        if (sizes.length > 6) s.append(" (+").append(sizes.length - 6).append(')');
+        return s.toString();
+    }
+
+    private void log(String text) {
+        Journal.line(context, text);
     }
 
     void close() {
@@ -454,10 +532,12 @@ final class CameraEngine {
             createSession();
         }
         @Override public void onDisconnected(CameraDevice d) {
+            log("DEVICE disconnected");
             d.close();
             device = null;
         }
         @Override public void onError(CameraDevice d, int error) {
+            log("DEVICE error " + error);
             d.close();
             device = null;
             fail("Camera error " + error);
@@ -521,6 +601,7 @@ final class CameraEngine {
             }
         }
         @Override public void onConfigureFailed(CameraCaptureSession s) {
+            log("SESSION configure failed");
             fail("Session failed");
         }
     };
@@ -528,6 +609,11 @@ final class CameraEngine {
     /** Reports what the camera actually chose for the preview, a few times a second. */
     private final CameraCaptureSession.CaptureCallback previewCallback = new CameraCaptureSession.CaptureCallback() {
         @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult result) {
+            Integer afs = result.get(CaptureResult.CONTROL_AF_STATE);
+            if (afs != null && afs != lastAfState && focusX >= 0f) {
+                lastAfState = afs;
+                log("AF state " + afState(afs) + ", AE state " + result.get(CaptureResult.CONTROL_AE_STATE));
+            }
             long now = System.currentTimeMillis();
             if (now - lastExposurePost < 400) return;
             lastExposurePost = now;
@@ -716,14 +802,65 @@ final class CameraEngine {
                     synchronized (pending) {
                         pending.add(shot);
                     }
-                    session.capture(b.build(), null, h);
+                    log(String.format(Locale.US,
+                            "SHOT zoom %.2f, view %.2f, frame share %.3f, frame in view %s, path %s, crop on sensor %s, "
+                                    + "cut %s, device %d, jpeg %d, focus %s, lock %s, ev %.2f, wb %s",
+                            getZoom(), viewZoom(), frameShare(), frameInView().toShortString(),
+                            frameShare() >= 0.999f ? "whole view" : freeformCrop ? "camera cuts" : "cut after",
+                            frameShare() < 0.999f && freeformCrop ? frameOnSensor().toShortString() : "-",
+                            shot.cut == null ? "-" : shot.cut.toShortString(), deviceRotation, jpegRotation,
+                            focusX >= 0f ? String.format(Locale.US, "(%.3f, %.3f)", focusX, focusY) : "camera",
+                            locked, ev, WB_LABELS[wb]));
+                    shotStarted = System.currentTimeMillis();
+                    session.capture(b.build(), stillCallback, h);
                 } catch (CameraAccessException e) {
+                    Journal.error(context, "capture", e);
                     fail("Not taken");
                 } catch (IllegalStateException e) {
+                    Journal.error(context, "capture", e);
                     fail("Not taken");
                 }
             }
         });
+    }
+
+    /** What the camera says it did for the still: the real test of the crop. */
+    private final CameraCaptureSession.CaptureCallback stillCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult res) {
+            StringBuilder b = new StringBuilder("STILL result: exposure ")
+                    .append(res.get(CaptureResult.SENSOR_EXPOSURE_TIME)).append(" ns, ISO ")
+                    .append(res.get(CaptureResult.SENSOR_SENSITIVITY)).append(", crop ")
+                    .append(res.get(CaptureResult.SCALER_CROP_REGION));
+            if (Build.VERSION.SDK_INT >= 30) b.append(", zoom ratio ").append(res.get(CaptureResult.CONTROL_ZOOM_RATIO));
+            b.append(", AF ").append(afState(res.get(CaptureResult.CONTROL_AF_STATE)))
+                    .append(", AE ").append(res.get(CaptureResult.CONTROL_AE_STATE))
+                    .append(", noise ").append(res.get(CaptureResult.NOISE_REDUCTION_MODE))
+                    .append(", edge ").append(res.get(CaptureResult.EDGE_MODE));
+            if (Build.VERSION.SDK_INT >= 29) {
+                String phys = res.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
+                if (phys != null) b.append(", lens in use ").append(phys);
+            }
+            log(b.toString());
+        }
+
+        @Override public void onCaptureFailed(CameraCaptureSession s, CaptureRequest r,
+                                              android.hardware.camera2.CaptureFailure f) {
+            log("STILL failed, reason " + f.getReason());
+        }
+    };
+
+    private static String afState(Integer s) {
+        if (s == null) return "?";
+        switch (s) {
+            case CameraMetadata.CONTROL_AF_STATE_INACTIVE: return "inactive";
+            case CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN: return "passive scan";
+            case CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED: return "passive focused";
+            case CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN: return "active scan";
+            case CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED: return "focused, locked";
+            case CameraMetadata.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED: return "not focused, locked";
+            case CameraMetadata.CONTROL_AF_STATE_PASSIVE_UNFOCUSED: return "passive unfocused";
+            default: return String.valueOf(s);
+        }
     }
 
     private void onJpeg(ImageReader reader) {
@@ -742,6 +879,8 @@ final class CameraEngine {
             shot = pending.isEmpty() ? new Shot() : pending.remove(0);
         }
         shot.jpeg = bytes;
+        log(String.format(Locale.US, "JPEG %d bytes, %d ms after the shutter", bytes.length,
+                System.currentTimeMillis() - shotStarted));
         main.post(new Runnable() {
             @Override public void run() {
                 listener.onShot(shot);
