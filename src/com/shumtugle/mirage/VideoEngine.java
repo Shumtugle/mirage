@@ -95,6 +95,13 @@ final class VideoEngine {
     private volatile boolean steady;
     private int[] eisModes = new int[0];
     private int[] oisModes = new int[0];
+    /**
+     * How much stabilisation Steady asks for: 3 a steady preview and the
+     * optical lens, 2 electronic and optical, 1 optical only, 0 none. Some
+     * phones take a level for the preview but give no frames once the
+     * recorder joins; then the level steps down until frames come.
+     */
+    private int stabLevel = 3;
 
     VideoEngine(Context c, Listener l) {
         context = c.getApplicationContext();
@@ -114,6 +121,7 @@ final class VideoEngine {
     /** Takes effect at the next open. */
     void setSteady(boolean on) {
         steady = on;
+        stabLevel = 3;
     }
 
     boolean steady() {
@@ -374,18 +382,18 @@ final class VideoEngine {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, toRecorder ? recordFps : previewFps);
-        if (!highSpeed) {
-            // Stabilisation, only where the ordinary session can take it.
-            if (steady) {
-                if (Build.VERSION.SDK_INT >= 33 && contains(eisModes,
-                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) {
-                    b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                            CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION);
-                } else if (contains(eisModes, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) {
-                    b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON);
-                }
+        if (!highSpeed && steady) {
+            // Stabilisation, only where the ordinary session can take it, at the level that gives frames.
+            if (stabLevel >= 3 && Build.VERSION.SDK_INT >= 33 && contains(eisModes,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) {
+                b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION);
+            } else if (stabLevel >= 2 && contains(eisModes, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) {
+                b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON);
+            } else {
+                b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
             }
-            if (contains(oisModes, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
+            if (stabLevel >= 1 && contains(oisModes, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
                 b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON);
             }
         }
@@ -424,7 +432,54 @@ final class VideoEngine {
                 String phys = res.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
                 if (phys != null) b.append(", lens in use ").append(phys);
             }
+            if (steady && !highSpeed) b.append(", steady level ").append(stabLevel);
             Journal.line(context, b.toString());
+        }
+
+        @Override public void onCaptureFailed(CameraCaptureSession s, CaptureRequest r,
+                                              android.hardware.camera2.CaptureFailure f) {
+            if (failuresLogged++ < 3) {
+                Journal.line(context, "VIDEO frame failed, reason " + f.getReason()
+                        + (steady && !highSpeed ? ", steady level " + stabLevel : ""));
+            }
+        }
+    };
+
+    private int failuresLogged;
+
+    /** Steps the stabilisation down while recording gives no frames. */
+    private final Runnable watchFrames = new Runnable() {
+        @Override public void run() {
+            if (!recording || loggedResult) return;
+            if (!highSpeed && stabLevel == 0 && recordFps != null && recordFps.getUpper() > 30) {
+                // Without stabilisation and still nothing: the rate itself is too much for two streams.
+                recordFps = new Range<Integer>(30, 30);
+                previewFps = recordFps;
+                stabLevel = -1;
+                Journal.line(context, "VIDEO no frames even without stabilisation; rate down to 30");
+                try {
+                    repeat(true);
+                } catch (Exception e) {
+                    Journal.error(context, "rate step down", e);
+                }
+                final Handler h = handler;
+                if (h != null) h.postDelayed(this, 1500);
+                return;
+            }
+            if (!steady || highSpeed || stabLevel <= 0) {
+                Journal.line(context, "VIDEO no frames reach the recorder"
+                        + (steady && !highSpeed ? " even without stabilisation" : ""));
+                return;
+            }
+            stabLevel--;
+            Journal.line(context, "VIDEO no frames reach the recorder; steady level down to " + stabLevel);
+            try {
+                repeat(true);
+            } catch (Exception e) {
+                Journal.error(context, "steady step down", e);
+            }
+            final Handler h = handler;
+            if (h != null) h.postDelayed(this, 1500);
         }
     };
 
@@ -489,6 +544,8 @@ final class VideoEngine {
                     recorder.start();
                     started = System.currentTimeMillis();
                     recording = true;
+                    failuresLogged = 0;
+                    h.postDelayed(watchFrames, 1500);
                     Journal.line(context, String.format(Locale.US,
                             "RECORD start %s: %dx%d at %d fps, %s, zoom %.1f, sound %s, turn %d",
                             name, WIDTH, HEIGHT, fps(), highSpeed ? "high-speed" : "ordinary", zoom, sound,
@@ -515,6 +572,7 @@ final class VideoEngine {
     private void stopOnThread() {
         if (!recording) return;
         recording = false;
+        if (handler != null) handler.removeCallbacks(watchFrames);
         long ms = System.currentTimeMillis() - started;
         boolean ok = true;
         // First stop feeding the recorder, then let it close the file.

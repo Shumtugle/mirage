@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.3
+
+- Steady finds what the phone can carry: when recording gets no frames with
+  the full stabilisation, it steps down without stopping (steady preview,
+  then electronic, then optical only, then none). Each step and each lost
+  frame is written in the diary.
+
 ## 0.4.2
 
 - Video opens reliably: the session no longer loses its surface when the

@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.2";
+    static final String VERSION = "0.4.3";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
