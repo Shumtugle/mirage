@@ -45,6 +45,10 @@ import java.util.Locale;
  *
  * The recorder draws from one lasting surface, so the session is built once
  * and each clip only brings a fresh recorder to it.
+ *
+ * Steady trades speed for a calm picture: an ordinary session at up to 60
+ * frames, where the phone's own stabilisation, optical and electronic, may
+ * be asked for. The high-speed session does not take those settings.
  */
 final class VideoEngine {
 
@@ -88,6 +92,9 @@ final class VideoEngine {
 
     private volatile float zoom = 2f;
     private volatile boolean withSound = true;
+    private volatile boolean steady;
+    private int[] eisModes = new int[0];
+    private int[] oisModes = new int[0];
 
     VideoEngine(Context c, Listener l) {
         context = c.getApplicationContext();
@@ -102,6 +109,15 @@ final class VideoEngine {
 
     void setSound(boolean on) {
         withSound = on;
+    }
+
+    /** Takes effect at the next open. */
+    void setSteady(boolean on) {
+        steady = on;
+    }
+
+    boolean steady() {
+        return steady;
     }
 
     boolean recording() {
@@ -139,6 +155,12 @@ final class VideoEngine {
             activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             sensorOrientation = so == null ? 90 : so;
+            int[] eis = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
+            int[] ois = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
+            eisModes = eis == null ? new int[0] : eis;
+            oisModes = ois == null ? new int[0] : ois;
+            Journal.line(context, "VIDEO stabilisation offered: electronic " + Arrays.toString(eisModes)
+                    + ", optical " + Arrays.toString(oisModes) + "; steady asked " + steady);
             chooseRates();
             manager.openCamera(id, deviceCallback, handler);
         } catch (Exception e) {
@@ -179,6 +201,8 @@ final class VideoEngine {
         StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
         int[] caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
         highSpeed = false;
+        previewFps = null;
+        recordFps = null;
         StringBuilder s = new StringBuilder("VIDEO capabilities: high speed ");
         boolean hsCap = caps != null && contains(caps,
                 CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO);
@@ -187,7 +211,7 @@ final class VideoEngine {
             s.append("\nhigh-speed sizes ").append(Arrays.toString(map.getHighSpeedVideoSizes()));
             for (Size sz : map.getHighSpeedVideoSizes()) {
                 s.append("\n ").append(sz).append(": ").append(Arrays.toString(map.getHighSpeedVideoFpsRangesFor(sz)));
-                if (sz.getWidth() == WIDTH && sz.getHeight() == HEIGHT) {
+                if (!steady && sz.getWidth() == WIDTH && sz.getHeight() == HEIGHT) {
                     for (Range<Integer> r : map.getHighSpeedVideoFpsRangesFor(sz)) {
                         if (r.getUpper() == FPS) {
                             highSpeed = true;
@@ -206,7 +230,8 @@ final class VideoEngine {
             Range<Integer> best = new Range<Integer>(30, 30);
             if (ranges != null) {
                 for (Range<Integer> r : ranges) {
-                    if (r.getLower().equals(r.getUpper()) && r.getUpper() > best.getUpper() && r.getUpper() <= FPS) best = r;
+                    int cap = steady ? 60 : FPS;
+                    if (r.getLower().equals(r.getUpper()) && r.getUpper() > best.getUpper() && r.getUpper() <= cap) best = r;
                 }
                 s.append("\nordinary fps ranges ").append(Arrays.toString(ranges));
             }
@@ -297,6 +322,21 @@ final class VideoEngine {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, toRecorder ? recordFps : previewFps);
+        if (!highSpeed) {
+            // Stabilisation, only where the ordinary session can take it.
+            if (steady) {
+                if (Build.VERSION.SDK_INT >= 33 && contains(eisModes,
+                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) {
+                    b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                            CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION);
+                } else if (contains(eisModes, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) {
+                    b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON);
+                }
+            }
+            if (contains(oisModes, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
+                b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON);
+            }
+        }
         float z = Math.max(1f, zoom);
         if (Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, Math.min(z, zoomRange.getUpper()));
@@ -324,7 +364,9 @@ final class VideoEngine {
                     .append(res.get(CaptureResult.SENSOR_EXPOSURE_TIME)).append(" ns, ISO ")
                     .append(res.get(CaptureResult.SENSOR_SENSITIVITY)).append(", fps range ")
                     .append(res.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)).append(", crop ")
-                    .append(res.get(CaptureResult.SCALER_CROP_REGION));
+                    .append(res.get(CaptureResult.SCALER_CROP_REGION))
+                    .append(", electronic stabilisation ").append(res.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE))
+                    .append(", optical ").append(res.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE));
             if (Build.VERSION.SDK_INT >= 30) b.append(", zoom ratio ").append(res.get(CaptureResult.CONTROL_ZOOM_RATIO));
             if (Build.VERSION.SDK_INT >= 29) {
                 String phys = res.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);

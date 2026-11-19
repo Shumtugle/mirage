@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4";
+    static final String VERSION = "0.4.1";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -108,6 +108,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private static final int REQ_AUDIO = 2;
     private static final String PREF_MODE = "mode";
     private static final String PREF_VIDEO_ZOOM = "video_zoom";
+    private static final String PREF_STEADY = "steady";
     private static final String PREF_LAST_VIDEO = "last_video";
     private WbIcon wbIcon;
     private Thumb thumb;
@@ -142,6 +143,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         video = "video".equals(prefs.getString(PREF_MODE, "photo"));
         videoZoom = prefs.getFloat(PREF_VIDEO_ZOOM, 2f);
         videoEngine.setZoom(videoZoom);
+        videoEngine.setSteady(prefs.getBoolean(PREF_STEADY, false));
         lastIsVideo = prefs.getBoolean(PREF_LAST_VIDEO, false);
         engine.setFrame(prefs.getFloat(PREF_FRAME_X, 0.5f), prefs.getFloat(PREF_FRAME_Y, 0.5f));
         active = store.getDefault();
@@ -749,6 +751,32 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 lp.rightMargin = dp(10);
                 presetRow.addView(pill, lp);
             }
+            // Steady: an ordinary session with the phone's stabilisation, at up to 60 frames.
+            final boolean st = videoEngine.steady();
+            TextView steadyPill = text(17, st ? Palette.INK : Palette.MUTED);
+            steadyPill.setText("Steady");
+            steadyPill.setGravity(Gravity.CENTER);
+            steadyPill.setPadding(dp(18), 0, dp(18), 0);
+            GradientDrawable sbg = rounded(st ? Palette.RAISED : Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
+            sbg.setStroke(st ? dp(1.5f) : dp(1), st ? Palette.ACCENT_TEXT : Palette.LINE);
+            steadyPill.setBackground(sbg);
+            if (st) steadyPill.setTypeface(Palette.bodyStrong);
+            steadyPill.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (videoEngine.recording()) return;
+                    boolean on = !videoEngine.steady();
+                    prefs.edit().putBoolean(PREF_STEADY, on).apply();
+                    Journal.line(MainActivity.this, "STEADY " + (on ? "on" : "off"));
+                    videoEngine.close();
+                    opened = false;
+                    videoEngine.setSteady(on);
+                    refreshPresets();
+                    if (resumed && missingPermissions().length == 0 && preview.isAvailable()) {
+                        videoEngine.open(preview.getSurfaceTexture());
+                    }
+                }
+            });
+            presetRow.addView(steadyPill, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)));
             return;
         }
         for (final Preset p : store.list) {
@@ -884,7 +912,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             int a = vs.length();
             vs.append("720p ").append(String.valueOf(videoFps));
             vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            vs.append(" \u00b7 main lens");
+            vs.append(videoEngine.steady() ? " \u00b7 steady" : " \u00b7 main lens");
             subtitle.setText(vs);
             if (!videoEngine.recording()) {
                 SpannableStringBuilder c = new SpannableStringBuilder("720p \u00b7 " + videoFps);

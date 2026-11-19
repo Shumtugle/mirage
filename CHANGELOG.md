@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.1
+
+- Steady, beside the video zooms: an ordinary session at up to 60 frames
+  with the phone's own stabilisation, optical and electronic, and a steady
+  preview where the phone offers it. Off, video stays at 120 frames, which the
+  high-speed mode records without stabilisation.
+
 ## 0.4
 
 - Video: 720p at 120 frames a second with sound, played back at its real
