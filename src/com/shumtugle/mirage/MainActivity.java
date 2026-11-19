@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.3.3";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -666,6 +666,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         if (overlay != null) overlay.setFrame(engine.frameInView());
     }
 
+    private String storageLabel() {
+        if (!Saver.wantsCard(this)) return "Photos: phone memory";
+        return Saver.cardVolume(this) != null ? "Photos: memory card" : "Photos: card (not in, using phone)";
+    }
+
     private String evText() {
         float ev = engine.getEv();
         if (Math.abs(ev) < 0.05f) return "\u00b10 EV";
@@ -786,6 +791,25 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             }
         });
         box.addView(grid, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)));
+        if (Saver.cardVolume(this) != null || Saver.wantsCard(this)) {
+            final TextView store = navPill(storageLabel(), false);
+            GradientDrawable sb = rounded(Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
+            sb.setStroke(dp(1), Palette.LINE);
+            store.setBackground(sb);
+            store.setTextColor(Palette.INK);
+            store.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    boolean card = !Saver.wantsCard(MainActivity.this);
+                    prefs.edit().putBoolean(Saver.PREF_CARD, card).apply();
+                    Journal.line(MainActivity.this, "STORAGE " + (card ? "card" : "phone")
+                            + ", card volume " + Saver.cardVolume(MainActivity.this));
+                    store.setText(storageLabel());
+                }
+            });
+            LinearLayout.LayoutParams stl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
+            stl.topMargin = dp(8);
+            box.addView(store, stl);
+        }
         TextView hint = text(13f, Palette.HINT);
         hint.setText("On the viewfinder: drag the frame, tap to focus, hold to lock focus and exposure, double tap to start over.");
         hint.setPadding(0, dp(10), 0, 0);

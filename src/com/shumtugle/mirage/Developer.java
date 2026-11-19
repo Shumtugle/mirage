@@ -21,7 +21,7 @@ import java.util.concurrent.Executors;
 
 /**
  * The darkroom behind the shutter. A shot is finished first \u2014 the frame cut
- * out when the camera could not cut it itself \u2014 and saved to the pictures
+ * out when the camera could not cut it itself \u2014 and saved to the camera
  * folder at once. Then, on the same quiet thread, it is developed into a few
  * variants with the photo editor's own light and geometry: corrected light,
  * a brighter one, the horizon levelled, and light with the verticals stood up.
@@ -32,7 +32,7 @@ import java.util.concurrent.Executors;
 final class Developer {
 
     interface Listener {
-        /** The shot itself is in the pictures folder. */
+        /** The shot itself is in the camera folder. */
         void onSaved(Uri uri, Bitmap thumb);
         /** The roll changed: a variant is ready, or there will be none. */
         void onRoll();
@@ -313,7 +313,7 @@ final class Developer {
 
     // ------------------------------------------------------------- the roll
 
-    /** Takes a picture of the roll out of the pictures folder and off the roll. */
+    /** Takes a picture of the roll out of the camera folder and off the roll. */
     boolean discard(Variant v) {
         if (v.kept != null && !Saver.delete(context, v.kept)) return false;
         synchronized (this) {

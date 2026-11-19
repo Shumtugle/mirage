@@ -21,9 +21,14 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** Puts photos into the phone's pictures folder and reads them back upright. */
+/**
+ * Puts photos into the camera folder, on the phone's own memory or on its
+ * memory card, and reads them back upright.
+ */
 final class Saver {
     static final String FOLDER = "Mirage";
+    static final String PREFS = "mirage";
+    static final String PREF_CARD = "card";
 
     private Saver() {
     }
@@ -38,15 +43,42 @@ final class Saver {
         return Build.VERSION.SDK_INT >= 29 ? saveScoped(context, name, jpeg) : saveLegacy(context, name, jpeg);
     }
 
+    /** The memory card's volume as the media store names it, or null when there is none. */
+    static String cardVolume(Context context) {
+        if (Build.VERSION.SDK_INT < 29) return null;
+        try {
+            for (String v : MediaStore.getExternalVolumeNames(context)) {
+                if (!MediaStore.VOLUME_EXTERNAL_PRIMARY.equals(v)) return v;
+            }
+        } catch (RuntimeException ignored) {
+            // no card, or none the media store can see
+        }
+        return null;
+    }
+
+    static boolean wantsCard(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_CARD, false);
+    }
+
+    /** Where the next photo goes: the card when it is chosen and present, else the phone. */
+    private static String volume(Context context) {
+        if (wantsCard(context)) {
+            String card = cardVolume(context);
+            if (card != null) return card;
+            Journal.line(context, "STORAGE card chosen but not present, saving to the phone");
+        }
+        return MediaStore.VOLUME_EXTERNAL_PRIMARY;
+    }
+
     /** Android 10 and newer: the media store owns the file, no storage permission needed. */
     private static Uri saveScoped(Context context, String name, byte[] jpeg) {
         ContentResolver cr = context.getContentResolver();
         ContentValues v = new ContentValues();
         v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
         v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + FOLDER);
+        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/" + FOLDER);
         v.put(MediaStore.Images.Media.IS_PENDING, 1);
-        Uri uri = cr.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v);
+        Uri uri = cr.insert(MediaStore.Images.Media.getContentUri(volume(context)), v);
         if (uri == null) return null;
         OutputStream out = null;
         try {
@@ -66,10 +98,10 @@ final class Saver {
         return uri;
     }
 
-    /** Android 9 and older: a plain file in the pictures folder, registered with the media store. */
+    /** Android 9 and older: a plain file in the phone's camera folder, registered with the media store. */
     @SuppressWarnings("deprecation")
     private static Uri saveLegacy(Context context, String name, byte[] jpeg) {
-        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), FOLDER);
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), FOLDER);
         if (!dir.isDirectory() && !dir.mkdirs()) return null;
         File f = new File(dir, name);
         FileOutputStream out = null;
@@ -138,7 +170,7 @@ final class Saver {
         return upright(jpeg, sample);
     }
 
-    /** Takes a photo this app saved back out of the pictures folder. */
+    /** Takes a photo this app saved back out of the camera folder. */
     static boolean delete(Context context, Uri uri) {
         try {
             return context.getContentResolver().delete(uri, null, null) > 0;

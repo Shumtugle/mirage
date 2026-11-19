@@ -1,5 +1,12 @@
 # Changes
 
+## 0.3.3
+
+- Photos and variants go to `DCIM/Mirage` again, where cameras keep theirs.
+- A choice in the camera's card: the phone's memory or the memory card
+  (Android 10 and newer, when a card is in). Without the card, photos fall
+  back to the phone and the diary says so.
+
 ## 0.3.2
 
 - A diary: one plain text file a day in `Documents/Mirage`, with every camera

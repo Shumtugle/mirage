@@ -29,7 +29,7 @@ import java.util.Locale;
 
 /**
  * The last shot and its variants, one at a time. All of them are already in
- * the pictures folder: swipe to look, delete the ones not worth keeping, or
+ * the camera folder: swipe to look, delete the ones not worth keeping, or
  * hand one to the photo editor to finish by hand.
  */
 public final class Darkroom extends Activity implements Developer.Listener {
@@ -280,7 +280,7 @@ public final class Darkroom extends Activity implements Developer.Listener {
         return b;
     }
 
-    /** Takes the picture on screen out of the pictures folder. */
+    /** Takes the picture on screen out of the camera folder. */
     private void deleteShown() {
         if (roll == null || roll.isEmpty()) return;
         final Developer.Variant v = roll.get(index);
