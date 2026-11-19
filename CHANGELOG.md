@@ -1,5 +1,11 @@
 # Changes
 
+## 0.3.1
+
+- Everything is saved by itself: the shot and every variant as soon as it is
+  developed, all in `Pictures/Mirage`.
+- In the darkroom, Keep gave way to Delete; Edit opens the picture on screen.
+
 ## 0.3
 
 - The view shows three quarters of the photo's zoom; the photo is a frame

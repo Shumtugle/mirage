@@ -20,7 +20,8 @@ Project page: https://shumtugle.github.io/mirage/
 - Shutter: the round button, the hardware camera key or either volume key.
 - The ring on the left shows the last photo. Tap it to look through the shot
   and its variants — corrected light, brighter, the horizon levelled, light
-  with the verticals stood up — and keep the ones you like.
+  with the verticals stood up. All of them are already saved; delete the ones
+  you do not want, or open one in an editor.
 - The app's sign at the top opens a card with the camera's facts: photo size,
   sensor size, whether the full sensor resolution is open to the app, and
   whether the camera can crop off the centre. The thirds grid is switched there.
@@ -28,7 +29,7 @@ Project page: https://shumtugle.github.io/mirage/
 The light and geometry of the variants are the same code as in the author's
 photo editor: `Light`, `Upright`, `Pose` and `Warp` are copies of its files.
 
-Photos go to `DCIM/Mirage`.
+Photos go to `Pictures/Mirage`, and so do the variants, each as soon as it is ready.
 
 ## Main lens only
 

@@ -21,7 +21,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** Puts photos into the phone's camera folder and reads them back upright. */
+/** Puts photos into the phone's pictures folder and reads them back upright. */
 final class Saver {
     static final String FOLDER = "Mirage";
 
@@ -44,7 +44,7 @@ final class Saver {
         ContentValues v = new ContentValues();
         v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
         v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/" + FOLDER);
+        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + FOLDER);
         v.put(MediaStore.Images.Media.IS_PENDING, 1);
         Uri uri = cr.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v);
         if (uri == null) return null;
@@ -66,10 +66,10 @@ final class Saver {
         return uri;
     }
 
-    /** Android 9 and older: a plain file in the camera folder, registered with the media store. */
+    /** Android 9 and older: a plain file in the pictures folder, registered with the media store. */
     @SuppressWarnings("deprecation")
     private static Uri saveLegacy(Context context, String name, byte[] jpeg) {
-        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), FOLDER);
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), FOLDER);
         if (!dir.isDirectory() && !dir.mkdirs()) return null;
         File f = new File(dir, name);
         FileOutputStream out = null;
@@ -136,6 +136,15 @@ final class Saver {
         int sample = 1;
         while (Math.min(o.outWidth, o.outHeight) / (sample * 2) >= 256) sample *= 2;
         return upright(jpeg, sample);
+    }
+
+    /** Takes a photo this app saved back out of the pictures folder. */
+    static boolean delete(Context context, Uri uri) {
+        try {
+            return context.getContentResolver().delete(uri, null, null) > 0;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static void closeQuietly(OutputStream out) {

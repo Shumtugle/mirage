@@ -28,8 +28,9 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * The last shot and its variants, one at a time: swipe to the next, keep the
- * ones worth keeping, or hand one to the photo editor to finish by hand.
+ * The last shot and its variants, one at a time. All of them are already in
+ * the pictures folder: swipe to look, delete the ones not worth keeping, or
+ * hand one to the photo editor to finish by hand.
  */
 public final class Darkroom extends Activity implements Developer.Listener {
 
@@ -43,7 +44,7 @@ public final class Darkroom extends Activity implements Developer.Listener {
     private TextView subtitle;
     private ImageView picture;
     private LinearLayout dots;
-    private TextView keep;
+    private TextView delete;
     private int shown = -1;
     private String shownPath;
 
@@ -107,19 +108,19 @@ public final class Darkroom extends Activity implements Developer.Listener {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER);
-        keep = pill("Keep", true);
-        keep.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { keepShown(false); }
+        delete = pill("Delete", false);
+        delete.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { deleteShown(); }
         });
-        TextView edit = pill("Edit", false);
+        TextView edit = pill("Edit", true);
         edit.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { keepShown(true); }
+            @Override public void onClick(View v) { editShown(); }
         });
         TextView close = pill("Close", false);
         close.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { finish(); }
         });
-        bar.addView(keep, pillParams());
+        bar.addView(delete, pillParams());
         bar.addView(edit, pillParams());
         bar.addView(close, pillParams());
         LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
@@ -202,13 +203,11 @@ public final class Darkroom extends Activity implements Developer.Listener {
         title.setText(v.name);
         StringBuilder s = new StringBuilder(String.format(Locale.US, "%d of %d", index + 1, roll.size()));
         if (!v.ready) s.append(" \u00b7 developing");
-        else if (developer.developing()) s.append(" \u00b7 more on the way");
+        else s.append(" \u00b7 saved");
+        if (v.ready && developer.developing()) s.append(" \u00b7 more on the way");
         subtitle.setText(s);
-
-        boolean kept = v.kept != null;
-        keep.setText(kept ? "Kept" : "Keep");
-        keep.setAlpha(kept ? 0.6f : 1f);
-        keep.setEnabled(!kept && v.ready);
+        delete.setEnabled(v.ready);
+        delete.setAlpha(v.ready ? 1f : 0.5f);
 
         dots.removeAllViews();
         for (int i = 0; i < roll.size(); i++) {
@@ -281,26 +280,33 @@ public final class Darkroom extends Activity implements Developer.Listener {
         return b;
     }
 
-    /** Keeps the picture on screen; with edit, opens it in the photo editor afterwards. */
-    private void keepShown(final boolean edit) {
+    /** Takes the picture on screen out of the pictures folder. */
+    private void deleteShown() {
         if (roll == null || roll.isEmpty()) return;
         final Developer.Variant v = roll.get(index);
         if (!v.ready) return;
         new Thread(new Runnable() {
             @Override public void run() {
-                final Uri uri = developer.keep(v);
+                final boolean ok = developer.discard(v);
                 main.post(new Runnable() {
                     @Override public void run() {
-                        if (uri == null) {
-                            Toast.makeText(Darkroom.this, "Not saved", Toast.LENGTH_SHORT).show();
+                        if (!ok) {
+                            Toast.makeText(Darkroom.this, "Not deleted", Toast.LENGTH_SHORT).show();
                             return;
                         }
-                        show();
-                        if (edit) openEditor(uri);
+                        shown = -1;
+                        shownPath = null;
+                        onRoll();
                     }
                 });
             }
         }).start();
+    }
+
+    private void editShown() {
+        if (roll == null || roll.isEmpty()) return;
+        Developer.Variant v = roll.get(index);
+        if (v.ready && v.kept != null) openEditor(v.kept);
     }
 
     private void openEditor(Uri uri) {

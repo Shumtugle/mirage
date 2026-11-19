@@ -12,7 +12,6 @@ import android.os.Looper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -22,16 +21,18 @@ import java.util.concurrent.Executors;
 
 /**
  * The darkroom behind the shutter. A shot is finished first \u2014 the frame cut
- * out when the camera could not cut it itself \u2014 and saved to the camera
+ * out when the camera could not cut it itself \u2014 and saved to the pictures
  * folder at once. Then, on the same quiet thread, it is developed into a few
  * variants with the photo editor's own light and geometry: corrected light,
  * a brighter one, the horizon levelled, and light with the verticals stood up.
- * Variants wait in the app's cache until one is kept; the next shot clears them.
+ * Every variant is saved beside the shot as soon as it is ready; nothing waits
+ * for a hand. A copy stays in the app's cache for looking through, until the
+ * next shot.
  */
 final class Developer {
 
     interface Listener {
-        /** The shot itself is in the camera folder. */
+        /** The shot itself is in the pictures folder. */
         void onSaved(Uri uri, Bitmap thumb);
         /** The roll changed: a variant is ready, or there will be none. */
         void onRoll();
@@ -220,12 +221,15 @@ final class Developer {
                 out = lay(lit, laid);
                 if (lit != full) lit.recycle();
             }
-            v.file = writeCache(stem + "_" + suffix + ".jpg", encode(out));
+            byte[] bytes = encode(out);
+            String fileName = stem + "_" + suffix + ".jpg";
+            v.file = writeCache(fileName, bytes);
+            v.kept = Saver.save(context, fileName, bytes);
         } finally {
             if (out != null && out != full) out.recycle();
         }
         synchronized (this) {
-            v.ready = v.file != null;
+            v.ready = v.file != null && v.kept != null;
             if (!v.ready) roll.remove(v);
         }
         notifyRoll();
@@ -281,21 +285,14 @@ final class Developer {
 
     // ------------------------------------------------------------- the roll
 
-    /** Copies a variant into the camera folder; the shot itself is already there. */
-    Uri keep(Variant v) {
-        if (v.kept != null) return v.kept;
-        if (v.file == null) return null;
-        try {
-            byte[] bytes = readAll(v.file);
-            String stamp = v.file.getName();
-            Uri uri = Saver.save(context, stamp, bytes);
-            synchronized (this) {
-                v.kept = uri;
-            }
-            return uri;
-        } catch (IOException e) {
-            return null;
+    /** Takes a picture of the roll out of the pictures folder and off the roll. */
+    boolean discard(Variant v) {
+        if (v.kept != null && !Saver.delete(context, v.kept)) return false;
+        synchronized (this) {
+            roll.remove(v);
         }
+        if (v.file != null) v.file.delete();
+        return true;
     }
 
     private void clearRoll() {
@@ -319,19 +316,6 @@ final class Developer {
             }
             f.delete();
             return null;
-        }
-    }
-
-    private static byte[] readAll(File f) throws IOException {
-        FileInputStream in = new FileInputStream(f);
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream((int) f.length());
-            byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            return out.toByteArray();
-        } finally {
-            in.close();
         }
     }
 
