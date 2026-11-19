@@ -267,32 +267,84 @@ final class VideoEngine {
 
     @SuppressWarnings("deprecation")
     private void createSession() {
+        createSession(true);
+    }
+
+    /**
+     * Builds the session from its own local pieces, so that a close arriving
+     * from the screen in the middle cannot pull a surface out from under it.
+     * The preview buffer is set to the video size right before it is used; the
+     * screen may have stretched it to its own size since. A size refusal is
+     * tried once more after a breath.
+     */
+    @SuppressWarnings("deprecation")
+    private void createSession(final boolean mayRetry) {
+        final CameraDevice d = device;
+        final SurfaceTexture st = texture;
+        if (d == null || st == null) return;
+        Surface preview = null;
+        Surface rec = null;
         try {
-            texture.setDefaultBufferSize(WIDTH, HEIGHT);
-            previewSurface = new Surface(texture);
-            recorderSurface = MediaCodec.createPersistentInputSurface();
+            st.setDefaultBufferSize(WIDTH, HEIGHT);
+            preview = new Surface(st);
+            rec = MediaCodec.createPersistentInputSurface();
             // The lasting surface takes its size from a recorder prepared once; this one never records.
             File dummy = new File(context.getCacheDir(), "warmup.mp4");
-            MediaRecorder warm = newRecorder(false);
+            MediaRecorder warm = newRecorder(false, rec);
             warm.setOutputFile(dummy.getPath());
             warm.prepare();
             warm.release();
             dummy.delete();
-
-            List<Surface> outs = Arrays.asList(previewSurface, recorderSurface);
+            if (device != d) {   // closed while we were building
+                preview.release();
+                rec.release();
+                return;
+            }
+            previewSurface = preview;
+            recorderSurface = rec;
+            st.setDefaultBufferSize(WIDTH, HEIGHT);
+            List<Surface> outs = Arrays.asList(preview, rec);
             if (highSpeed) {
-                device.createConstrainedHighSpeedCaptureSession(outs, sessionCallback, handler);
+                d.createConstrainedHighSpeedCaptureSession(outs, sessionCallback, handler);
             } else {
-                device.createCaptureSession(outs, sessionCallback, handler);
+                d.createCaptureSession(outs, sessionCallback, handler);
+            }
+        } catch (IllegalArgumentException e) {
+            Journal.error(context, "video session", e);
+            if (preview != null) preview.release();
+            if (rec != null) rec.release();
+            previewSurface = null;
+            recorderSurface = null;
+            final Handler h = handler;
+            if (mayRetry && h != null && device == d) {
+                Journal.line(context, "VIDEO session: trying once more");
+                h.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (device == d) createSession(false);
+                    }
+                }, 300);
+            } else {
+                fail("Video not ready");
             }
         } catch (Exception e) {
             Journal.error(context, "video session", e);
+            if (preview != null) preview.release();
+            if (rec != null) rec.release();
             fail("Video not ready");
         }
     }
 
+    /** The size the preview buffer must keep while video is open. */
+    static void holdBufferSize(SurfaceTexture st) {
+        st.setDefaultBufferSize(WIDTH, HEIGHT);
+    }
+
     private final CameraCaptureSession.StateCallback sessionCallback = new CameraCaptureSession.StateCallback() {
         @Override public void onConfigured(CameraCaptureSession s) {
+            if (device == null) {
+                s.close();
+                return;
+            }
             session = s;
             try {
                 repeat(false);
@@ -393,6 +445,10 @@ final class VideoEngine {
     // ------------------------------------------------------------ recording
 
     private MediaRecorder newRecorder(boolean sound) throws Exception {
+        return newRecorder(sound, recorderSurface);
+    }
+
+    private MediaRecorder newRecorder(boolean sound, Surface input) throws Exception {
         MediaRecorder r = Build.VERSION.SDK_INT >= 31 ? new MediaRecorder(context) : new MediaRecorder();
         if (sound) r.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         r.setVideoSource(MediaRecorder.VideoSource.SURFACE);
@@ -407,7 +463,7 @@ final class VideoEngine {
             r.setAudioChannels(2);
             r.setAudioEncodingBitRate(192000);
         }
-        r.setInputSurface(recorderSurface);
+        r.setInputSurface(input);
         return r;
     }
 

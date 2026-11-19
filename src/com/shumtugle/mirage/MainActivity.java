@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.1";
+    static final String VERSION = "0.4.2";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -382,7 +382,10 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
                 if (resumed && missingPermissions().length == 0) openCamera(st);
             }
-            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) { }
+            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {
+                // The view resets its buffer to its own size; video must keep its own.
+                if (video) VideoEngine.holdBufferSize(st);
+            }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) { return true; }
             @Override public void onSurfaceTextureUpdated(SurfaceTexture st) { }
         });

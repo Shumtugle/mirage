@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.2
+
+- Video opens reliably: the session no longer loses its surface when the
+  screen closes the camera in the middle of building it (the sound question
+  did that), and the preview keeps the video size when the screen stretches
+  it; a refused size is tried once more.
+
 ## 0.4.1
 
 - Steady, beside the video zooms: an ordinary session at up to 60 frames
