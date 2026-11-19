@@ -1,5 +1,22 @@
 # Changes
 
+## 0.3
+
+- The view shows three quarters of the photo's zoom; the photo is a frame
+  inside it, moved with a finger and left where the finger left it. The view
+  around the frame is dimmed, the thirds grid lies inside the frame.
+- When the camera can crop anywhere on its sensor, the frame is cut by the
+  camera itself and loses nothing; when it can only crop about the centre,
+  the whole view is taken and the frame cut afterwards.
+- Tap to focus and meter on a point; press and hold to lock focus and
+  exposure there; double tap to bring the frame back and give focus back.
+- Stills ask the camera for its best noise reduction and sharpening.
+- Every shot is saved at once and then developed in the background into
+  variants with the photo editor's own light and geometry: Fix, Bright,
+  Level, and Fix with the verticals stood up. The last-shot ring opens them;
+  keep the ones you like, or open one in an editor.
+- The grid switch moved into the camera's card, with a line on the gestures.
+
 ## 0.2
 
 - A new look, shared with the author's other apps: a warm near-black ground,

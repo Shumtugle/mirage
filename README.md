@@ -11,14 +11,22 @@ Project page: https://shumtugle.github.io/mirage/
 - Press and hold a preset: save the current settings into it, make it the default,
   rename, delete.
 - `+` at the end of the row adds a preset from the current settings.
-- Pinch to zoom, double tap to return to the default preset, hold the picture
-  to show or hide the rule-of-thirds grid.
+- The viewfinder shows a little more than the photo: the photo is the frame
+  inside it. Drag the frame; it stays where you leave it.
+- Tap to focus and meter, press and hold to lock focus and exposure, double
+  tap to bring the frame back to the middle, pinch to zoom.
 - `−` / `+` beside the shutter change exposure, the ringed button on the right
   cycles white balance.
 - Shutter: the round button, the hardware camera key or either volume key.
-- The ring on the left shows the last photo; tap it to open the photo.
+- The ring on the left shows the last photo. Tap it to look through the shot
+  and its variants — corrected light, brighter, the horizon levelled, light
+  with the verticals stood up — and keep the ones you like.
 - The app's sign at the top opens a card with the camera's facts: photo size,
-  sensor size, and whether the full sensor resolution is open to the app.
+  sensor size, whether the full sensor resolution is open to the app, and
+  whether the camera can crop off the centre. The thirds grid is switched there.
+
+The light and geometry of the variants are the same code as in the author's
+photo editor: `Light`, `Upright`, `Pose` and `Warp` are copies of its files.
 
 Photos go to `DCIM/Mirage`.
 

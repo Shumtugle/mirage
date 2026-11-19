@@ -24,6 +24,21 @@
   .phone { width: 300px; border: 1px solid var(--edge); border-radius: 26px; background: var(--bg); padding-top: 10px;
            overflow: hidden; position: relative; user-select: none; touch-action: none; }
   .view { width: 276px; height: 368px; margin: 0 auto; position: relative; overflow: hidden; background: #000; border-radius: 20px; }
+  .frame { position: absolute; pointer-events: none; box-shadow: 0 0 0 999px rgba(18,13,9,.55);
+           outline: 1px solid rgba(243,231,207,.35); }
+  .frame i { position: absolute; width: 14px; height: 14px; border: 2px solid var(--amber); }
+  .frame .a { left: -1px; top: -1px; border-right: 0; border-bottom: 0; }
+  .frame .b { right: -1px; top: -1px; border-left: 0; border-bottom: 0; }
+  .frame .c { left: -1px; bottom: -1px; border-right: 0; border-top: 0; }
+  .frame .d { right: -1px; bottom: -1px; border-left: 0; border-top: 0; }
+  .focus { position: absolute; width: 50px; height: 50px; margin: -25px 0 0 -25px; border-radius: 50%;
+           border: 2px solid var(--amber); pointer-events: none; display: none; }
+  .focus::after { content: ""; position: absolute; left: 21px; top: 21px; width: 4px; height: 4px;
+           border-radius: 50%; background: var(--amber); }
+  .focus b { position: absolute; left: 50%; bottom: 58px; transform: translateX(-50%); white-space: nowrap;
+           font: 700 10px/1 Text, sans-serif; letter-spacing: .8px; color: var(--amber);
+           background: rgba(18,13,9,.75); padding: 6px 10px; border-radius: 11px; display: none; }
+  .focus.lock b { display: block; }
   .grid { position: absolute; inset: 0; pointer-events: none;
           background:
             linear-gradient(90deg, transparent calc(33.333% - .5px), rgba(243,231,207,.42) 0 calc(33.333% + .5px), transparent 0 calc(66.666% - .5px), rgba(243,231,207,.42) 0 calc(66.666% + .5px), transparent 0),
@@ -77,7 +92,8 @@
           <canvas id="scene" width="600" height="800"></canvas>
           <video id="cam" playsinline muted hidden></video>
           <div class="tint" id="tint"></div>
-          <div class="grid" id="grid"></div>
+          <div class="frame" id="frame"><div class="grid" id="grid"></div><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i></div>
+          <div class="focus" id="focus"><b>AE/AF LOCK</b></div>
           <div class="zoom" id="zoom">2.0&times;</div>
         </div>
         <div class="panel">
@@ -94,9 +110,10 @@
       <p class="src">Painted scene. <button id="usecam">Use this device's camera</button></p>
     </div>
     <div>
-      <p>The same controls as the app. Tap a preset, pinch or drag on the picture to
-      zoom, double tap to return to the default preset, press and hold the picture to
-      show or hide the thirds grid, press and hold a preset to save the current settings into it.</p>
+      <p>The same controls as the app. The view is a little wider than the photo: the
+      photo is the frame inside it. Drag the frame to where the picture is, tap to
+      focus, press and hold to lock focus and exposure, double tap to start over,
+      pinch to zoom. Press and hold a preset to save the current settings into it.</p>
       <p>Here the browser enlarges the picture after the fact. The app asks the
       camera itself for the zoom, before the picture is made.</p>
       <p>Your camera stays on your device: the page has no server and sends nothing.</p>
@@ -109,7 +126,15 @@
       never hops to the wide-angle lens.</li>
     <li>Opens straight at the default preset, 2&times; out of the box: the first frame is already zoomed.</li>
     <li>Presets hold zoom, exposure and white balance. Add, rename, delete, pick the default.</li>
-    <li>A rule-of-thirds grid over the viewfinder; hold the picture to hide it.</li>
+    <li>The view shows three quarters of the photo's zoom; the photo is a frame you move
+      with a finger, and it stays where you left it. When the camera can crop anywhere on
+      its sensor, the frame is cut by the camera and loses nothing.</li>
+    <li>Tap to focus and meter, press and hold to lock both.</li>
+    <li>A rule-of-thirds grid inside the frame, switched in the app's card.</li>
+    <li>Every shot is saved at once, then developed in the background into a few
+      variants: corrected light, brighter, the horizon levelled, light with the
+      verticals stood up. Tap the last-shot ring to look through them and keep
+      the ones you like.</li>
     <li>Tap the app's sign at the top to see what the camera offers: photo size, sensor size,
       and whether the full sensor resolution is open to the app.</li>
     <li>Shutter on screen, on the hardware camera key, or on either volume key.</li>
@@ -140,6 +165,7 @@
   var state = { zoom: 2, ev: 0, wb: 0 };
   var active = presets[0];
   var MAX = 8, STEP = 1 / 3;
+  var frame = { x: 0.5, y: 0.5 };
 
   var view = document.getElementById("view");
   var scene = document.getElementById("scene");
@@ -179,7 +205,15 @@
     var z = clampZoom(state.zoom);
     state.zoom = z;
     var el = cam.hidden ? scene : cam;
-    el.style.transform = "scale(" + z + ")";
+    var vz = Math.max(1, z * 0.75);
+    el.style.transform = "scale(" + vz + ")";
+    var s = vz / z, W = view.clientWidth, H = view.clientHeight;
+    frame.x = Math.max(s / 2, Math.min(1 - s / 2, frame.x));
+    frame.y = Math.max(s / 2, Math.min(1 - s / 2, frame.y));
+    var fr = document.getElementById("frame");
+    fr.style.left = (frame.x - s / 2) * W + "px"; fr.style.top = (frame.y - s / 2) * H + "px";
+    fr.style.width = s * W + "px"; fr.style.height = s * H + "px";
+    fr.style.boxShadow = s > 0.999 ? "none" : "";
     el.style.filter = "brightness(" + Math.pow(2, state.ev * 0.5) + ")";
     tint.style.background = TINT[state.wb];
     document.getElementById("zoom").textContent = z.toFixed(1) + "×";
@@ -229,38 +263,46 @@
     setTimeout(function () { view.style.transition = ""; }, 260);
   };
 
-  // pinch with two fingers, drag up/down with one, double tap for the default
-  var pts = {}, startDist = 0, startZoom = 2, lastY = null, lastTap = 0, holdTimer = null;
+  // drag the frame, tap to focus, hold to lock, double tap to start over, pinch to zoom
+  var pts = {}, startDist = 0, startZoom = 2, lastTap = 0, holdTimer = null, drag = null;
+  var focus = document.getElementById("focus");
+  function rel(e) { var r = view.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; }
+  function setFocus(p, lock) {
+    focus.style.display = "block"; focus.style.left = p[0] * 100 + "%"; focus.style.top = p[1] * 100 + "%";
+    focus.classList.toggle("lock", !!lock);
+  }
   view.addEventListener("pointerdown", function (e) {
     view.setPointerCapture(e.pointerId);
     pts[e.pointerId] = e;
     var ids = Object.keys(pts);
-    if (ids.length === 2) { startDist = dist(); startZoom = state.zoom; lastY = null; }
-    else { lastY = e.clientY; }
     clearTimeout(holdTimer);
-    if (ids.length === 1) {
-      var sx = e.clientX, sy = e.clientY;
-      holdTimer = setTimeout(function () {
-        if (Object.keys(pts).length !== 1) return;
-        var p = pts[Object.keys(pts)[0]];
-        if (Math.hypot(p.clientX - sx, p.clientY - sy) > 10) return;
-        document.getElementById("grid").classList.toggle("off");
-        lastY = null;
-      }, 600);
-    }
+    if (ids.length === 2) { startDist = dist(); startZoom = state.zoom; drag = null; return; }
+    var p = rel(e), z = clampZoom(state.zoom), s = Math.max(1, z * 0.75) / z;
+    var inFrame = Math.abs(p[0] - frame.x) <= s / 2 && Math.abs(p[1] - frame.y) <= s / 2;
+    drag = { p: p, fx: frame.x, fy: frame.y, inFrame: inFrame, moved: false, held: false };
+    holdTimer = setTimeout(function () {
+      if (!drag || drag.moved || Object.keys(pts).length !== 1) return;
+      drag.held = true; setFocus(drag.p, true);
+    }, 600);
     var now = Date.now();
-    if (ids.length === 1 && now - lastTap < 300) {
-      for (var i = 0; i < presets.length; i++) if (presets[i].def) select(presets[i]);
+    if (now - lastTap < 300) {
+      frame.x = 0.5; frame.y = 0.5; focus.style.display = "none"; drag = null; apply();
     }
     lastTap = now;
   });
   view.addEventListener("pointermove", function (e) {
     if (!pts[e.pointerId]) return;
     pts[e.pointerId] = e;
-    if (Object.keys(pts).length === 2) { state.zoom = startZoom * dist() / startDist; apply(); }
-    else if (lastY !== null) { state.zoom *= Math.pow(1.01, lastY - e.clientY); lastY = e.clientY; apply(); }
+    if (Object.keys(pts).length === 2) { state.zoom = startZoom * dist() / startDist; apply(); return; }
+    if (!drag) return;
+    var p = rel(e), dx = p[0] - drag.p[0], dy = p[1] - drag.p[1];
+    if (!drag.moved && Math.hypot(dx * view.clientWidth, dy * view.clientHeight) > 8) drag.moved = true;
+    if (drag.moved && drag.inFrame) { frame.x = drag.fx + dx; frame.y = drag.fy + dy; apply(); }
   });
-  function up(e) { delete pts[e.pointerId]; lastY = null; clearTimeout(holdTimer); }
+  view.addEventListener("pointerup", function (e) {
+    if (drag && !drag.moved && !drag.held && Object.keys(pts).length === 1) setFocus(drag.p, false);
+  }, true);
+  function up(e) { delete pts[e.pointerId]; clearTimeout(holdTimer); if (!Object.keys(pts).length) drag = null; }
   view.addEventListener("pointerup", up);
   view.addEventListener("pointercancel", up);
   function dist() {

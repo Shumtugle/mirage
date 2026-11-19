@@ -1,14 +1,10 @@
 package com.shumtugle.mirage;
 
 import android.annotation.SuppressLint;
-import android.content.ContentResolver;
-import android.content.ContentValues;
 import android.content.Context;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
-import android.graphics.Matrix;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -19,51 +15,64 @@ import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
-import android.media.MediaScannerConnection;
-import android.net.Uri;
 import android.os.Build;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
-import android.provider.MediaStore;
 import android.util.Range;
 import android.util.Rational;
 import android.util.Size;
+import android.util.SizeF;
 import android.view.Surface;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executor;
 
 /**
  * Drives the main rear camera module through Camera2.
- * All camera calls run on a private background thread; listener
- * callbacks are delivered on the main thread.
+ *
+ * The viewfinder shows a little more than the photo: the view is zoomed to
+ * three quarters of the photo's zoom, and the photo is a frame inside it that
+ * the hand moves. When the camera can crop anywhere on its sensor, the frame
+ * is asked of the sensor itself and loses nothing; when it can only crop
+ * about the centre, the whole view is taken and the frame is cut afterwards.
+ *
+ * All camera calls run on a private background thread; listener callbacks
+ * are delivered on the main thread.
  */
 final class CameraEngine {
 
     interface Listener {
         void onOpened(Size previewSize);
         void onExposure(long exposureNs, int iso, float aperture);
-        void onSaved(boolean ok, Uri uri, Bitmap thumb);
+        /** A shot has arrived: its bytes and how to finish it. */
+        void onShot(Shot shot);
         void onError(String message);
     }
 
-    static final String FOLDER = "Mirage";
+    /** One photo as the camera handed it over. */
+    static final class Shot {
+        byte[] jpeg;
+        /** Degrees the pixels must still be turned clockwise to stand upright, when the camera left that to the file. */
+        int rotation;
+        /** Where the frame lies in the upright picture, 0..1, or null when the camera already cut it. */
+        RectF cut;
+        /** The lens in 35 mm terms, at the zoom of the finished photo. */
+        double lens35;
+    }
+
+    /** The view shows this share of the photo's zoom, so a little more than the photo around it. */
+    static final float VIEW_SHARE = 0.75f;
 
     static final int[] WB_MODES = {
             CameraMetadata.CONTROL_AWB_MODE_AUTO,
@@ -74,7 +83,6 @@ final class CameraEngine {
     };
     static final String[] WB_LABELS = {"Auto", "Daylight", "Cloudy", "Lamp", "Fluorescent"};
 
-    private final Context context;
     private final Listener listener;
     private final CameraManager manager;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -96,20 +104,34 @@ final class CameraEngine {
     private Rational evStep;
     private int sensorOrientation = 90;
     private int[] afModes = new int[0];
+    private int[] noiseModes = new int[0];
+    private int[] edgeModes = new int[0];
+    private int maxAfRegions;
+    private int maxAeRegions;
+    private boolean freeformCrop;
+    private double lens35 = 26.0;
     private Size previewSize;
     private Size jpegSize;
+    private String info = "";
 
     // Requested state. Written from the UI thread, read on the camera thread.
-    private volatile float zoom = 1f;
+    private volatile float zoom = 2f;
     private volatile float ev = 0f;
     private volatile int wb = 0;
     private volatile int deviceRotation = 0;
-    private volatile int lastJpegRotation = 0;
+    /** Centre of the frame in the view, 0..1. */
+    private volatile float frameX = 0.5f;
+    private volatile float frameY = 0.5f;
+    /** Point of focus in the view, 0..1; negative when the camera chooses for itself. */
+    private volatile float focusX = -1f;
+    private volatile float focusY = -1f;
+    private volatile boolean locked;
+
     private long lastExposurePost;
-    private String info = "";
+    /** Settings of the shot on its way, kept until its bytes arrive. */
+    private final List<Shot> pending = new ArrayList<Shot>();
 
     CameraEngine(Context context, Listener listener) {
-        this.context = context.getApplicationContext();
         this.listener = listener;
         this.manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
     }
@@ -145,9 +167,82 @@ final class CameraEngine {
         deviceRotation = degrees;
     }
 
+    /** Moves the frame; the view itself does not move. */
+    void setFrame(float x, float y) {
+        frameX = x;
+        frameY = y;
+    }
+
+    /** Focuses and meters on a point of the view; with lock, holds exposure and focus there. */
+    void focusAt(float x, float y, boolean lock) {
+        focusX = x;
+        focusY = y;
+        locked = lock;
+        final Handler h = handler;
+        if (h == null) return;
+        h.post(new Runnable() {
+            @Override public void run() {
+                if (session == null || previewBuilder == null) return;
+                try {
+                    applyControls(previewBuilder);
+                    if (maxAfRegions > 0 || contains(afModes, CameraMetadata.CONTROL_AF_MODE_AUTO)) {
+                        // Cancel whatever scan is running, then start one on the new point.
+                        previewBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL);
+                        session.capture(previewBuilder.build(), null, h);
+                        previewBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START);
+                        session.capture(previewBuilder.build(), null, h);
+                        previewBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
+                    }
+                    session.setRepeatingRequest(previewBuilder.build(), previewCallback, h);
+                } catch (CameraAccessException ignored) {
+                    // Closing; the next open starts from the camera's own focus.
+                } catch (IllegalStateException ignored) {
+                    // Same.
+                }
+            }
+        });
+    }
+
+    /** Gives focus and exposure back to the camera. */
+    void releaseFocus() {
+        focusX = -1f;
+        focusY = -1f;
+        locked = false;
+        final Handler h = handler;
+        if (h == null) return;
+        h.post(new Runnable() {
+            @Override public void run() {
+                if (session == null || previewBuilder == null) return;
+                try {
+                    previewBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL);
+                    session.capture(previewBuilder.build(), null, h);
+                    previewBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
+                    applyControls(previewBuilder);
+                    session.setRepeatingRequest(previewBuilder.build(), previewCallback, h);
+                } catch (CameraAccessException ignored) {
+                    // Closing.
+                } catch (IllegalStateException ignored) {
+                    // Same.
+                }
+            }
+        });
+    }
+
+    boolean focusing() { return focusX >= 0f; }
+    boolean locked() { return locked; }
     float getZoom() { return clampZoom(zoom); }
     float getEv() { return ev; }
     int getWb() { return wb; }
+
+    /** The zoom the view shows: three quarters of the photo's, never wider than the main lens. */
+    float viewZoom() {
+        return Math.max(1f, getZoom() * VIEW_SHARE);
+    }
+
+    /** The frame's side as a share of the view's side. */
+    float frameShare() {
+        return viewZoom() / getZoom();
+    }
 
     float minZoom() {
         // Never below 1.0: below that a multi-module camera switches to the wide-angle module.
@@ -220,6 +315,9 @@ final class CameraEngine {
         thread.quitSafely();
         thread = null;
         handler = null;
+        synchronized (pending) {
+            pending.clear();
+        }
     }
 
     /**
@@ -248,9 +346,45 @@ final class CameraEngine {
         evStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
         Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
         sensorOrientation = so == null ? 90 : so;
-        int[] af = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
-        afModes = af == null ? new int[0] : af;
+        afModes = orEmpty(chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES));
+        noiseModes = orEmpty(chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES));
+        edgeModes = orEmpty(chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES));
+        Integer af = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+        Integer ae = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+        maxAfRegions = af == null ? 0 : af;
+        maxAeRegions = ae == null ? 0 : ae;
+        Integer crop = chars.get(CameraCharacteristics.SCALER_CROPPING_TYPE);
+        freeformCrop = crop != null && crop == CameraMetadata.SCALER_CROPPING_TYPE_FREEFORM;
+        // The lens in 35 mm terms, for the reading of straight lines.
+        float[] focals = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+        SizeF physical = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+        if (focals != null && focals.length > 0 && physical != null) {
+            double diag = Math.hypot(physical.getWidth(), physical.getHeight());
+            if (diag > 0) lens35 = focals[0] * 43.27 / diag;
+        }
     }
+
+    private void chooseSizes() {
+        StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        jpegSize = largest4x3(map.getOutputSizes(ImageFormat.JPEG), Integer.MAX_VALUE, Integer.MAX_VALUE);
+        previewSize = largest4x3(map.getOutputSizes(SurfaceTexture.class), 1920, 1440);
+    }
+
+    /** Largest 4:3 size within the bounds; falls back to the largest size at all. */
+    private static Size largest4x3(Size[] sizes, int maxW, int maxH) {
+        Size best = null;
+        Size any = null;
+        for (Size s : sizes) {
+            long area = (long) s.getWidth() * s.getHeight();
+            if (any == null || area > (long) any.getWidth() * any.getHeight()) any = s;
+            if (s.getWidth() * 3 != s.getHeight() * 4) continue;
+            if (s.getWidth() > maxW || s.getHeight() > maxH) continue;
+            if (best == null || area > (long) best.getWidth() * best.getHeight()) best = s;
+        }
+        return best != null ? best : any;
+    }
+
+    // ---------------------------------------------------------------- facts
 
     /** Plain lines about the camera that was opened: what it gives an ordinary app. */
     String info() {
@@ -282,6 +416,11 @@ final class CameraEngine {
                 }
             }
         }
+        s.append("Frame anywhere on the sensor: ")
+                .append(freeformCrop ? "yes, cut by the camera" : "no, cut after the shot").append('\n');
+        s.append("Focus by touch: ").append(maxAfRegions > 0 ? "yes" : "no")
+                .append(", exposure by touch: ").append(maxAeRegions > 0 ? "yes" : "no").append('\n');
+        s.append(String.format(Locale.US, "Lens: %.0f mm in 35 mm terms", lens35)).append('\n');
         if (zoomRange != null) {
             s.append(String.format(Locale.US, "Zoom: %.1f\u00d7 to %.1f\u00d7", zoomRange.getLower(), zoomRange.getUpper()));
         } else {
@@ -307,25 +446,7 @@ final class CameraEngine {
                 s.getWidth() * (double) s.getHeight() / 1e6);
     }
 
-    private void chooseSizes() {
-        StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        jpegSize = largest4x3(map.getOutputSizes(ImageFormat.JPEG), Integer.MAX_VALUE, Integer.MAX_VALUE);
-        previewSize = largest4x3(map.getOutputSizes(SurfaceTexture.class), 1920, 1440);
-    }
-
-    /** Largest 4:3 size within the bounds; falls back to the largest size at all. */
-    private static Size largest4x3(Size[] sizes, int maxW, int maxH) {
-        Size best = null;
-        Size any = null;
-        for (Size s : sizes) {
-            long area = (long) s.getWidth() * s.getHeight();
-            if (any == null || area > (long) any.getWidth() * any.getHeight()) any = s;
-            if (s.getWidth() * 3 != s.getHeight() * 4) continue;
-            if (s.getWidth() > maxW || s.getHeight() > maxH) continue;
-            if (best == null || area > (long) best.getWidth() * best.getHeight()) best = s;
-        }
-        return best != null ? best : any;
-    }
+    // --------------------------------------------------------------- session
 
     private final CameraDevice.StateCallback deviceCallback = new CameraDevice.StateCallback() {
         @Override public void onOpened(CameraDevice d) {
@@ -426,28 +547,114 @@ final class CameraEngine {
 
     // ------------------------------------------------------------- requests
 
+    /** Exposure, colour and focus as requested, and the view's zoom. */
     private void applyControls(CaptureRequest.Builder b) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON);
-        if (contains(afModes, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
-            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-        }
         b.set(CaptureRequest.CONTROL_AWB_MODE, WB_MODES[wb]);
         if (evRange != null) {
             int steps = Math.max(evRange.getLower(), Math.min(evRange.getUpper(), currentEvSteps()));
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps);
         }
-        float z = getZoom();
+        b.set(CaptureRequest.CONTROL_AE_LOCK, locked);
+
+        boolean byTouch = focusX >= 0f;
+        if (byTouch && contains(afModes, CameraMetadata.CONTROL_AF_MODE_AUTO)) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO);
+        } else if (contains(afModes, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+        }
+        MeteringRectangle[] spot = byTouch ? spot(focusX, focusY) : null;
+        if (maxAfRegions > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, spot);
+        if (maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, spot);
+
+        zoomTo(b, viewZoom(), null);
+    }
+
+    /** Zoom about the centre, or, with a crop given, to that crop of the sensor at no zoom. */
+    private void zoomTo(CaptureRequest.Builder b, float z, Rect crop) {
+        if (crop != null) {
+            if (Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
+                b.set(CaptureRequest.CONTROL_ZOOM_RATIO, 1f);
+            }
+            b.set(CaptureRequest.SCALER_CROP_REGION, crop);
+            return;
+        }
         if (Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, z);
         } else if (activeArray != null) {
-            // Older path: crop the centre of the sensor.
-            int w = Math.round(activeArray.width() / z);
-            int h = Math.round(activeArray.height() / z);
-            int left = (activeArray.width() - w) / 2;
-            int top = (activeArray.height() - h) / 2;
-            b.set(CaptureRequest.SCALER_CROP_REGION, new Rect(left, top, left + w, top + h));
+            b.set(CaptureRequest.SCALER_CROP_REGION, centred(z));
         }
+    }
+
+    private Rect centred(float z) {
+        int w = Math.round(activeArray.width() / z);
+        int h = Math.round(activeArray.height() / z);
+        int left = (activeArray.width() - w) / 2;
+        int top = (activeArray.height() - h) / 2;
+        return new Rect(left, top, left + w, top + h);
+    }
+
+    /**
+     * A small square of metering about a point of the view. With zoom by
+     * ratio the camera reads regions in the zoomed view stretched over the
+     * whole sensor; with the older crop, in the sensor itself.
+     */
+    private MeteringRectangle[] spot(float vx, float vy) {
+        return spot(vx, vy, false);
+    }
+
+    /**
+     * The same square for a request taken at no zoom with a crop of the
+     * sensor: the point is carried from the zoomed view out to the whole sensor.
+     */
+    private MeteringRectangle[] spot(float vx, float vy, boolean unzoomed) {
+        if (activeArray == null) return null;
+        float[] s = rotate(vx, vy, (360 - sensorOrientation) % 360);
+        float sx, sy, span;
+        if (unzoomed) {
+            float vz = viewZoom();
+            sx = (0.5f + (s[0] - 0.5f) / vz) * activeArray.width();
+            sy = (0.5f + (s[1] - 0.5f) / vz) * activeArray.height();
+            span = 0.1f / vz;
+        } else if (Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
+            sx = s[0] * activeArray.width();
+            sy = s[1] * activeArray.height();
+            span = 0.1f;
+        } else {
+            Rect c = centred(viewZoom());
+            sx = c.left + s[0] * c.width();
+            sy = c.top + s[1] * c.height();
+            span = 0.1f / viewZoom();
+        }
+        int hw = Math.max(8, Math.round(activeArray.width() * span / 2f));
+        int hh = Math.max(8, Math.round(activeArray.height() * span / 2f));
+        int left = clamp(Math.round(sx) - hw, 0, activeArray.width() - 2 * hw);
+        int top = clamp(Math.round(sy) - hh, 0, activeArray.height() - 2 * hh);
+        return new MeteringRectangle[]{new MeteringRectangle(left, top, 2 * hw, 2 * hh, MeteringRectangle.METERING_WEIGHT_MAX)};
+    }
+
+    /** The frame as a rectangle of the view, 0..1. */
+    RectF frameInView() {
+        float s = frameShare();
+        float x = Math.max(s / 2f, Math.min(1f - s / 2f, frameX));
+        float y = Math.max(s / 2f, Math.min(1f - s / 2f, frameY));
+        return new RectF(x - s / 2f, y - s / 2f, x + s / 2f, y + s / 2f);
+    }
+
+    /** The frame as a crop of the sensor, at no zoom. */
+    private Rect frameOnSensor() {
+        RectF v = frameInView();
+        RectF s = rotate(v, (360 - sensorOrientation) % 360);
+        float vz = viewZoom();
+        float vw = activeArray.width() / vz;
+        float vh = activeArray.height() / vz;
+        float ox = (activeArray.width() - vw) / 2f;
+        float oy = (activeArray.height() - vh) / 2f;
+        Rect r = new Rect(Math.round(ox + s.left * vw), Math.round(oy + s.top * vh),
+                Math.round(ox + s.right * vw), Math.round(oy + s.bottom * vh));
+        r.intersect(0, 0, activeArray.width(), activeArray.height());
+        return r;
     }
 
     /** Pushes the current state into the running preview. */
@@ -474,25 +681,50 @@ final class CameraEngine {
         if (h == null) return;
         h.post(new Runnable() {
             @Override public void run() {
-                if (session == null || device == null || jpegReader == null) return;
+                if (session == null || device == null || jpegReader == null || activeArray == null) return;
                 try {
                     CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
                     b.addTarget(jpegReader.getSurface());
                     applyControls(b);
-                    lastJpegRotation = (sensorOrientation + deviceRotation) % 360;
-                    b.set(CaptureRequest.JPEG_ORIENTATION, lastJpegRotation);
+                    if (contains(noiseModes, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)) {
+                        b.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY);
+                    }
+                    if (contains(edgeModes, CameraMetadata.EDGE_MODE_HIGH_QUALITY)) {
+                        b.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_HIGH_QUALITY);
+                    }
+                    int jpegRotation = (sensorOrientation + deviceRotation) % 360;
+                    b.set(CaptureRequest.JPEG_ORIENTATION, jpegRotation);
                     b.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
+
+                    Shot shot = new Shot();
+                    shot.lens35 = lens35 * getZoom();
+                    if (frameShare() >= 0.999f) {
+                        shot.cut = null;   // the frame is the whole view
+                    } else if (freeformCrop) {
+                        zoomTo(b, 1f, frameOnSensor());
+                        if (focusX >= 0f) {
+                            MeteringRectangle[] at = spot(focusX, focusY, true);
+                            if (maxAfRegions > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, at);
+                            if (maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, at);
+                        }
+                        shot.cut = null;
+                    } else {
+                        // The camera can only crop about the centre: take the whole view and
+                        // cut the frame afterwards, turned the way the photo will stand.
+                        shot.cut = rotate(frameInView(), deviceRotation);
+                    }
+                    synchronized (pending) {
+                        pending.add(shot);
+                    }
                     session.capture(b.build(), null, h);
                 } catch (CameraAccessException e) {
-                    saved(null, null);
+                    fail("Not taken");
                 } catch (IllegalStateException e) {
-                    saved(null, null);
+                    fail("Not taken");
                 }
             }
         });
     }
-
-    // --------------------------------------------------------------- saving
 
     private void onJpeg(ImageReader reader) {
         Image img = reader.acquireNextImage();
@@ -505,99 +737,36 @@ final class CameraEngine {
         } finally {
             img.close();
         }
-        Uri uri = save(bytes);
-        saved(uri, uri == null ? null : thumbnail(bytes, lastJpegRotation));
-    }
-
-    private void saved(final Uri uri, final Bitmap thumb) {
+        final Shot shot;
+        synchronized (pending) {
+            shot = pending.isEmpty() ? new Shot() : pending.remove(0);
+        }
+        shot.jpeg = bytes;
         main.post(new Runnable() {
             @Override public void run() {
-                listener.onSaved(uri != null, uri, thumb);
+                listener.onShot(shot);
             }
         });
     }
 
-    /** A small upright copy of the photo for the last-shot button. */
-    static Bitmap thumbnail(byte[] jpeg, int rotation) {
-        BitmapFactory.Options o = new BitmapFactory.Options();
-        o.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, o);
-        int sample = 1;
-        while (Math.min(o.outWidth, o.outHeight) / (sample * 2) >= 256) sample *= 2;
-        o = new BitmapFactory.Options();
-        o.inSampleSize = sample;
-        Bitmap b = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, o);
-        if (b == null || rotation == 0) return b;
-        Matrix m = new Matrix();
-        m.postRotate(rotation);
-        return Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
-    }
-
-    private Uri save(byte[] jpeg) {
-        String name = "IMG_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date()) + ".jpg";
-        return Build.VERSION.SDK_INT >= 29 ? saveScoped(name, jpeg) : saveLegacy(name, jpeg);
-    }
-
-    /** Android 10 and newer: the media store owns the file, no storage permission needed. */
-    private Uri saveScoped(String name, byte[] jpeg) {
-        ContentResolver cr = context.getContentResolver();
-        ContentValues v = new ContentValues();
-        v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-        v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/" + FOLDER);
-        v.put(MediaStore.Images.Media.IS_PENDING, 1);
-        Uri uri = cr.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v);
-        if (uri == null) return null;
-        OutputStream out = null;
-        try {
-            out = cr.openOutputStream(uri);
-            if (out == null) throw new IllegalStateException();
-            out.write(jpeg);
-            out.close();
-            out = null;
-        } catch (Exception e) {
-            closeQuietly(out);
-            cr.delete(uri, null, null);
-            return null;
-        }
-        v.clear();
-        v.put(MediaStore.Images.Media.IS_PENDING, 0);
-        cr.update(uri, v, null, null);
-        return uri;
-    }
-
-    /** Android 9 and older: a plain file in the camera folder, then a media scan. */
-    @SuppressWarnings("deprecation")
-    private Uri saveLegacy(String name, byte[] jpeg) {
-        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), FOLDER);
-        if (!dir.isDirectory() && !dir.mkdirs()) return null;
-        File f = new File(dir, name);
-        FileOutputStream out = null;
-        try {
-            out = new FileOutputStream(f);
-            out.write(jpeg);
-            out.close();
-            out = null;
-        } catch (Exception e) {
-            closeQuietly(out);
-            f.delete();
-            return null;
-        }
-        // Register the file so galleries see it and other apps can open it by a content address.
-        ContentValues v = new ContentValues();
-        v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-        v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        v.put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis());
-        v.put(MediaStore.Images.Media.DATA, f.getPath());
-        try {
-            return context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
-        } catch (Exception e) {
-            MediaScannerConnection.scanFile(context, new String[]{f.getPath()}, new String[]{"image/jpeg"}, null);
-            return Uri.fromFile(f);
-        }
-    }
-
     // -------------------------------------------------------------- helpers
+
+    /** A point of a unit square turned clockwise by a multiple of 90 degrees. */
+    static float[] rotate(float x, float y, int degrees) {
+        switch (((degrees % 360) + 360) % 360) {
+            case 90: return new float[]{1f - y, x};
+            case 180: return new float[]{1f - x, 1f - y};
+            case 270: return new float[]{y, 1f - x};
+            default: return new float[]{x, y};
+        }
+    }
+
+    /** A rectangle of a unit square turned clockwise by a multiple of 90 degrees. */
+    static RectF rotate(RectF r, int degrees) {
+        float[] a = rotate(r.left, r.top, degrees);
+        float[] b = rotate(r.right, r.bottom, degrees);
+        return new RectF(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1]));
+    }
 
     private void fail(String message) {
         final String m = message == null ? "Camera error" : message;
@@ -608,9 +777,12 @@ final class CameraEngine {
         });
     }
 
-    private static void closeQuietly(OutputStream out) {
-        if (out == null) return;
-        try { out.close(); } catch (Exception ignored) { }
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(Math.max(lo, hi), v));
+    }
+
+    private static int[] orEmpty(int[] a) {
+        return a == null ? new int[0] : a;
     }
 
     private static boolean contains(int[] a, int v) {

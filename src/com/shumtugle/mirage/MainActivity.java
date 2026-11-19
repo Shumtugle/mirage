@@ -16,7 +16,6 @@ import android.graphics.SurfaceTexture;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
-import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -65,15 +64,18 @@ import java.util.Locale;
  * the zoom, the viewfinder card, the preset pills, a row of round controls
  * around the shutter, and two tabs at the bottom.
  */
-public final class MainActivity extends Activity implements CameraEngine.Listener {
-    static final String VERSION = "0.2";
+public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
+    static final String VERSION = "0.3";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
     private static final String PREF_LAST = "last";
+    private static final String PREF_FRAME_X = "frame_x";
+    private static final String PREF_FRAME_Y = "frame_y";
 
     private PresetStore store;
     private CameraEngine engine;
+    private Developer developer;
     private Preset active;
     private SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -111,6 +113,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         store = new PresetStore(this);
         engine = new CameraEngine(this, this);
+        developer = Developer.get(this);
+        engine.setFrame(prefs.getFloat(PREF_FRAME_X, 0.5f), prefs.getFloat(PREF_FRAME_Y, 0.5f));
         active = store.getDefault();
         engine.applyPreset(active);   // the very first frame is already at the default zoom
 
@@ -129,6 +133,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     protected void onResume() {
         super.onResume();
         resumed = true;
+        developer.setListener(this);
         orientation.enable();
         String[] missing = missingPermissions();
         if (missing.length > 0) {
@@ -146,6 +151,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     protected void onPause() {
         resumed = false;
         opened = false;
+        developer.setListener(null);
         main.removeCallbacks(ambientTick);
         orientation.disable();
         engine.close();
@@ -322,6 +328,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         overlay = new Overlay(this);
         overlay.setGrid(prefs.getBoolean(PREF_GRID, true));
+        overlay.setFrame(engine.frameInView());
         card.addView(overlay, matchParent());
         attachGestures(card);
 
@@ -345,7 +352,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         thumb = new Thumb(this);
         thumb.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { openLast(); }
+            @Override public void onClick(View v) { openDarkroom(); }
         });
         row.addView(cell(thumb, 80, 14, text(12.5f, Palette.MUTED), "Last"));
         row.addView(spacer());
@@ -395,10 +402,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     /**
-     * On the viewfinder: pinch to zoom, double tap for the default preset,
-     * press and hold to show or hide the thirds grid.
+     * On the viewfinder: drag the frame, tap to focus and meter there, press
+     * and hold to lock focus and exposure there, double tap to bring the frame
+     * back to the middle and give focus back to the camera, pinch to zoom.
      */
-    private void attachGestures(View target) {
+    private void attachGestures(final View target) {
         final ScaleGestureDetector pinch = new ScaleGestureDetector(this,
                 new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                     @Override public boolean onScale(ScaleGestureDetector d) {
@@ -408,25 +416,79 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                     }
                 });
         final GestureDetector taps = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onSingleTapConfirmed(MotionEvent e) {
+                float x = e.getX() / target.getWidth(), y = e.getY() / target.getHeight();
+                engine.focusAt(x, y, false);
+                overlay.setFocus(x, y, false);
+                return true;
+            }
             @Override public boolean onDoubleTap(MotionEvent e) {
-                select(store.getDefault());
+                moveFrame(0.5f, 0.5f);
+                saveFrame();
+                engine.releaseFocus();
+                overlay.setFocus(-1f, -1f, false);
                 return true;
             }
             @Override public void onLongPress(MotionEvent e) {
-                if (pinch.isInProgress()) return;
-                boolean on = !overlay.grid();
-                overlay.setGrid(on);
-                prefs.edit().putBoolean(PREF_GRID, on).apply();
+                if (pinch.isInProgress() || dragging) return;
+                float x = e.getX() / target.getWidth(), y = e.getY() / target.getHeight();
+                engine.focusAt(x, y, true);
+                overlay.setFocus(x, y, true);
                 overlay.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
             }
         });
+        final float slop = android.view.ViewConfiguration.get(this).getScaledTouchSlop();
         target.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY, startX, startY;
+            boolean inFrame;
             @Override public boolean onTouch(View v, MotionEvent e) {
                 pinch.onTouchEvent(e);
                 taps.onTouchEvent(e);
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downX = e.getX();
+                        downY = e.getY();
+                        android.graphics.RectF f = engine.frameInView();
+                        startX = f.centerX();
+                        startY = f.centerY();
+                        inFrame = f.contains(downX / v.getWidth(), downY / v.getHeight());
+                        dragging = false;
+                        break;
+                    case MotionEvent.ACTION_POINTER_DOWN:
+                        dragging = false;
+                        inFrame = false;
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        if (!inFrame || e.getPointerCount() > 1 || pinch.isInProgress()) break;
+                        float dx = e.getX() - downX, dy = e.getY() - downY;
+                        if (!dragging && Math.hypot(dx, dy) > slop) dragging = true;
+                        if (dragging) moveFrame(startX + dx / v.getWidth(), startY + dy / v.getHeight());
+                        break;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        if (dragging) saveFrame();
+                        dragging = false;
+                        break;
+                    default:
+                        break;
+                }
                 return true;
             }
         });
+    }
+
+    private boolean dragging;
+
+    private void moveFrame(float x, float y) {
+        engine.setFrame(x, y);
+        android.graphics.RectF f = engine.frameInView();
+        engine.setFrame(f.centerX(), f.centerY());   // kept inside the view
+        overlay.setFrame(f);
+    }
+
+    private void saveFrame() {
+        android.graphics.RectF f = engine.frameInView();
+        prefs.edit().putFloat(PREF_FRAME_X, f.centerX()).putFloat(PREF_FRAME_Y, f.centerY()).apply();
     }
 
     private void refreshPresets() {
@@ -560,7 +622,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         zoomTitle.setText(z);
 
         String wb = CameraEngine.WB_LABELS[engine.getWb()];
-        SpannableStringBuilder s = new SpannableStringBuilder("Main lens");
+        SpannableStringBuilder s = new SpannableStringBuilder(
+                String.format(Locale.US, "In a %.1f\u00d7 view", engine.viewZoom()));
         int mp = engine.photoMegapixels();
         if (mp > 0) {
             s.append(" \u00b7 ");
@@ -578,6 +641,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         wbIcon.setMode(engine.getWb());
         wbCaption.setText(wb);
+        if (overlay != null) overlay.setFrame(engine.frameInView());
     }
 
     private String evText() {
@@ -613,23 +677,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private Bitmap loadThumb(Uri uri) {
         try {
             byte[] jpeg = readAll(uri);
-            if (jpeg == null) return null;
-            int rotation = 0;
-            InputStream in = getContentResolver().openInputStream(uri);
-            if (in != null) {
-                try {
-                    ExifInterface exif = new ExifInterface(in);
-                    switch (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                        case ExifInterface.ORIENTATION_ROTATE_90: rotation = 90; break;
-                        case ExifInterface.ORIENTATION_ROTATE_180: rotation = 180; break;
-                        case ExifInterface.ORIENTATION_ROTATE_270: rotation = 270; break;
-                        default: break;
-                    }
-                } finally {
-                    in.close();
-                }
-            }
-            return CameraEngine.thumbnail(jpeg, rotation);
+            return jpeg == null ? null : Saver.thumbnail(jpeg);
         } catch (Exception e) {
             return null;
         }
@@ -702,9 +750,24 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         body.setTextIsSelectable(true);
         box.addView(body);
 
-        TextView grid = text(14.5f, Palette.MUTED);
-        grid.setText("Hold the viewfinder to show or hide the thirds grid.");
-        box.addView(grid);
+        final TextView grid = navPill(overlay.grid() ? "Thirds grid: on" : "Thirds grid: off", false);
+        GradientDrawable gb = rounded(Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
+        gb.setStroke(dp(1), Palette.LINE);
+        grid.setBackground(gb);
+        grid.setTextColor(Palette.INK);
+        grid.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean on = !overlay.grid();
+                overlay.setGrid(on);
+                prefs.edit().putBoolean(PREF_GRID, on).apply();
+                grid.setText(on ? "Thirds grid: on" : "Thirds grid: off");
+            }
+        });
+        box.addView(grid, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)));
+        TextView hint = text(13f, Palette.HINT);
+        hint.setText("On the viewfinder: drag the frame, tap to focus, hold to lock focus and exposure, double tap to start over.");
+        hint.setPadding(0, dp(10), 0, 0);
+        box.addView(hint);
 
         TextView version = text(12.5f, Palette.HINT);
         version.setText("Mirage " + VERSION);
@@ -756,16 +819,34 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     @Override
-    public void onSaved(boolean ok, Uri uri, Bitmap b) {
-        if (ok) {
-            preview.setAlpha(0.3f);
-            preview.animate().alpha(1f).setDuration(200).start();
-            lastUri = uri;
-            if (uri != null) prefs.edit().putString(PREF_LAST, uri.toString()).apply();
-            if (b != null) thumb.setBitmap(b);
-        } else {
-            Toast.makeText(this, "Not saved", Toast.LENGTH_SHORT).show();
+    public void onShot(CameraEngine.Shot shot) {
+        preview.setAlpha(0.3f);
+        preview.animate().alpha(1f).setDuration(200).start();
+        developer.develop(shot);
+    }
+
+    @Override
+    public void onSaved(Uri uri, Bitmap b) {
+        lastUri = uri;
+        if (uri != null) prefs.edit().putString(PREF_LAST, uri.toString()).apply();
+        if (b != null) thumb.setBitmap(b);
+    }
+
+    @Override
+    public void onRoll() {
+    }
+
+    @Override
+    public void onFailed() {
+        Toast.makeText(this, "Not saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void openDarkroom() {
+        if (developer.roll().isEmpty()) {
+            openLast();
+            return;
         }
+        startActivity(new Intent(this, Darkroom.class));
     }
 
     @Override
