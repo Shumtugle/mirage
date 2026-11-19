@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.3.3";
+    static final String VERSION = "0.4";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -91,6 +91,24 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private TextView exposureChip;
     private TextView evCaption;
     private TextView wbCaption;
+    private TextView minusButton;
+    private TextView plusButton;
+    private Shutter shutterButton;
+    private FitBox fit;
+    private LinearLayout nav;
+
+    /** Photo or video; video has its own engine and its own zooms. */
+    private boolean video;
+    private VideoEngine videoEngine;
+    private float videoZoom = 2f;
+    private int videoFps = VideoEngine.FPS;
+    private int deviceRotation;
+    private boolean lastIsVideo;
+    private boolean askedAudio;
+    private static final int REQ_AUDIO = 2;
+    private static final String PREF_MODE = "mode";
+    private static final String PREF_VIDEO_ZOOM = "video_zoom";
+    private static final String PREF_LAST_VIDEO = "last_video";
     private WbIcon wbIcon;
     private Thumb thumb;
 
@@ -120,17 +138,29 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         store = new PresetStore(this);
         engine = new CameraEngine(this, this);
         developer = Developer.get(this);
+        videoEngine = new VideoEngine(this, videoListener);
+        video = "video".equals(prefs.getString(PREF_MODE, "photo"));
+        videoZoom = prefs.getFloat(PREF_VIDEO_ZOOM, 2f);
+        videoEngine.setZoom(videoZoom);
+        lastIsVideo = prefs.getBoolean(PREF_LAST_VIDEO, false);
         engine.setFrame(prefs.getFloat(PREF_FRAME_X, 0.5f), prefs.getFloat(PREF_FRAME_Y, 0.5f));
         active = store.getDefault();
         engine.applyPreset(active);   // the very first frame is already at the default zoom
 
         buildUi();
+        if (video) {
+            minusButton.setAlpha(0.35f);
+            plusButton.setAlpha(0.35f);
+            wbIcon.setAlpha(0.35f);
+            wbCaption.setAlpha(0.35f);
+        }
         restoreLastShot();
 
         orientation = new OrientationEventListener(this) {
             @Override public void onOrientationChanged(int o) {
                 if (o == ORIENTATION_UNKNOWN) return;
-                engine.setDeviceRotation(((o + 45) / 90 * 90) % 360);
+                deviceRotation = ((o + 45) / 90 * 90) % 360;
+                engine.setDeviceRotation(deviceRotation);
             }
         };
     }
@@ -149,7 +179,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             }
             return;
         }
-        if (preview.isAvailable()) engine.open(preview.getSurfaceTexture());
+        if (video) askAudioOnce();
+        if (preview.isAvailable()) openCamera(preview.getSurfaceTexture());
         // Otherwise the texture listener opens the camera once the surface exists.
     }
 
@@ -161,6 +192,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         main.removeCallbacks(ambientTick);
         orientation.disable();
         engine.close();
+        videoEngine.close();
+        stopTimer();
         super.onPause();
     }
 
@@ -192,6 +225,12 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        if (code == REQ_AUDIO) {
+            boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+            videoEngine.setSound(ok);
+            Journal.line(this, "SOUND for video " + (ok ? "allowed" : "refused, clips will be silent"));
+            return;
+        }
         if (code != REQ_PERMS) return;
         Journal.line(this, "PERMISSIONS " + java.util.Arrays.toString(perms) + " -> " + java.util.Arrays.toString(results));
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -224,7 +263,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         column.addView(buildHeader());
 
-        FitBox fit = new FitBox(this);
+        fit = new FitBox(this);
+        fit.setRatio(video ? 9f / 16f : 3f / 4f);
         fit.setPadding(dp(16), 0, dp(16), 0);
         fit.addView(buildViewfinder());
         column.addView(fit, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -338,7 +378,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         preview = new TextureView(this);
         preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
-                if (resumed && missingPermissions().length == 0) engine.open(st);
+                if (resumed && missingPermissions().length == 0) openCamera(st);
             }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) { }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) { return true; }
@@ -378,30 +418,34 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         row.addView(spacer());
 
         TextView minus = roundButton("\u2212");
+        minusButton = minus;
         minus.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { engine.stepEv(-1); updateLabels(); }
+            @Override public void onClick(View v) { if (!video) { engine.stepEv(-1); updateLabels(); } }
         });
         row.addView(cell(minus, 58, 25, null, null));
         row.addView(spacer());
 
         Shutter shutter = new Shutter(this);
+        shutterButton = shutter;
+        shutter.setVideo(video);
         shutter.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { engine.capture(); }
+            @Override public void onClick(View v) { press(); }
         });
         evCaption = text(12.5f, Palette.MUTED);
         row.addView(cell(shutter, 108, 0, evCaption, null));
         row.addView(spacer());
 
         TextView plus = roundButton("+");
+        plusButton = plus;
         plus.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { engine.stepEv(1); updateLabels(); }
+            @Override public void onClick(View v) { if (!video) { engine.stepEv(1); updateLabels(); } }
         });
         row.addView(cell(plus, 58, 25, null, null));
         row.addView(spacer());
 
         wbIcon = new WbIcon(this);
         wbIcon.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { engine.cycleWb(); updateLabels(); }
+            @Override public void onClick(View v) { if (!video) { engine.cycleWb(); updateLabels(); } }
         });
         wbCaption = text(12.5f, Palette.ACCENT_TEXT);
         row.addView(cell(wbIcon, 72, 18, wbCaption, null));
@@ -409,16 +453,177 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private View buildNav() {
-        LinearLayout nav = new LinearLayout(this);
+        nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
-        TextView photo = navPill("Photo", true);
+        fillNav();
+        return nav;
+    }
+
+    private void fillNav() {
+        nav.removeAllViews();
+        TextView photo = navPill("Photo", !video);
+        TextView clip = navPill("Video", video);
         TextView album = navPill("Album", false);
+        photo.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { setMode(false); }
+        });
+        clip.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { setMode(true); }
+        });
         album.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { openAlbum(); }
         });
-        nav.addView(photo, new LinearLayout.LayoutParams(dp(130), dp(50)));
-        nav.addView(album, new LinearLayout.LayoutParams(dp(130), dp(50)));
-        return nav;
+        int w = dp(Math.min(118f, (getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density - 24f) / 3f));
+        nav.addView(photo, new LinearLayout.LayoutParams(w, dp(50)));
+        nav.addView(clip, new LinearLayout.LayoutParams(w, dp(50)));
+        nav.addView(album, new LinearLayout.LayoutParams(w, dp(50)));
+    }
+
+    // ------------------------------------------------------------ photo / video
+
+    private void openCamera(SurfaceTexture st) {
+        if (video) videoEngine.open(st);
+        else engine.open(st);
+    }
+
+    private void setMode(boolean toVideo) {
+        if (toVideo == video || videoEngine.recording()) return;
+        engine.close();
+        videoEngine.close();
+        opened = false;
+        video = toVideo;
+        prefs.edit().putString(PREF_MODE, video ? "video" : "photo").apply();
+        Journal.line(this, "MODE " + (video ? "video" : "photo"));
+        fit.setRatio(video ? 9f / 16f : 3f / 4f);
+        shutterButton.setVideo(video);
+        shutterButton.setRecording(false);
+        overlay.setFocus(-1f, -1f, false);
+        exposureChip.setVisibility(View.INVISIBLE);
+        float dim = video ? 0.35f : 1f;
+        minusButton.setAlpha(dim);
+        plusButton.setAlpha(dim);
+        wbIcon.setAlpha(dim);
+        wbCaption.setAlpha(dim);
+        fillNav();
+        refreshPresets();
+        updateLabels();
+        if (video) askAudioOnce();
+        if (resumed && missingPermissions().length == 0 && preview.isAvailable()) {
+            openCamera(preview.getSurfaceTexture());
+        }
+    }
+
+    /** Sound is asked for once, the first time video is chosen; without it, clips are silent. */
+    private void askAudioOnce() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            videoEngine.setSound(true);
+            return;
+        }
+        videoEngine.setSound(false);
+        if (askedAudio) return;
+        askedAudio = true;
+        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+    }
+
+    /** The shutter: a photo, or the start and end of a clip. */
+    private void press() {
+        if (!video) {
+            engine.capture();
+            return;
+        }
+        if (videoEngine.recording()) {
+            videoEngine.stop();
+            shutterButton.setRecording(false);
+            stopTimer();
+            setControlsEnabled(true);
+        } else {
+            videoEngine.start(deviceRotation);
+            shutterButton.setRecording(true);
+            setControlsEnabled(false);
+            main.postDelayed(timer, 250);
+        }
+    }
+
+    private void setControlsEnabled(boolean on) {
+        nav.setAlpha(on ? 1f : 0.4f);
+        presetRow.setAlpha(on ? 1f : 0.4f);
+    }
+
+    private final Runnable timer = new Runnable() {
+        @Override public void run() {
+            if (!videoEngine.recording()) {
+                updateLabels();
+                return;
+            }
+            long s = videoEngine.elapsedMs() / 1000;
+            SpannableStringBuilder t = new SpannableStringBuilder(
+                    String.format(Locale.US, "\u25cf %02d:%02d", s / 60, s % 60));
+            t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            t.setSpan(new ForegroundColorSpan(Palette.INK), 1, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            evCaption.setText(t);
+            main.postDelayed(this, 250);
+        }
+    };
+
+    private void stopTimer() {
+        main.removeCallbacks(timer);
+        if (shutterButton != null) shutterButton.setRecording(false);
+        if (nav != null) setControlsEnabled(true);
+    }
+
+    private final VideoEngine.Listener videoListener = new VideoEngine.Listener() {
+        @Override public void onOpened(Size previewSize, int fps) {
+            opened = true;
+            videoFps = fps;
+            updateLabels();
+            main.removeCallbacks(ambientTick);
+            main.postDelayed(ambientTick, 300);
+        }
+
+        @Override public void onSaved(final Uri uri, boolean ok) {
+            stopTimer();
+            updateLabels();
+            if (!ok || uri == null) {
+                Toast.makeText(MainActivity.this, "Clip not saved", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            lastUri = uri;
+            lastIsVideo = true;
+            prefs.edit().putString(PREF_LAST, uri.toString()).putBoolean(PREF_LAST_VIDEO, true).apply();
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    final Bitmap b = videoFrame(uri);
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            if (b != null) thumb.setBitmap(b);
+                        }
+                    });
+                }
+            }).start();
+        }
+
+        @Override public void onError(String message) {
+            stopTimer();
+            MainActivity.this.onError(message);
+        }
+    };
+
+    /** A still from the start of a clip, for the last-shot ring. */
+    private Bitmap videoFrame(Uri uri) {
+        android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
+        try {
+            r.setDataSource(this, uri);
+            Bitmap b = r.getFrameAtTime(0);
+            if (b == null) return null;
+            float k = 256f / Math.max(1, Math.min(b.getWidth(), b.getHeight()));
+            if (k >= 1f) return b;
+            return Bitmap.createScaledBitmap(b, Math.round(b.getWidth() * k), Math.round(b.getHeight() * k), true);
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            try { r.release(); } catch (Exception ignored) { }
+        }
     }
 
     /**
@@ -462,6 +667,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             float downX, downY, startX, startY;
             boolean inFrame;
             @Override public boolean onTouch(View v, MotionEvent e) {
+                if (video) return true;
                 pinch.onTouchEvent(e);
                 taps.onTouchEvent(e);
                 switch (e.getActionMasked()) {
@@ -514,6 +720,37 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     private void refreshPresets() {
         presetRow.removeAllViews();
+        if (video) {
+            List<String> names = VideoEngine.zoomNames();
+            for (int i = 0; i < VideoEngine.ZOOMS.length; i++) {
+                final float z = VideoEngine.ZOOMS[i];
+                boolean on = Math.abs(z - videoZoom) < 0.01f;
+                TextView pill = text(17, Palette.INK);
+                pill.setText(names.get(i));
+                pill.setGravity(Gravity.CENTER);
+                pill.setPadding(dp(20), 0, dp(20), 0);
+                pill.setMinimumWidth(dp(78));
+                GradientDrawable bg = rounded(on ? Palette.RAISED : Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
+                bg.setStroke(on ? dp(1.5f) : dp(1), on ? Palette.BRASS : Palette.LINE);
+                pill.setBackground(bg);
+                if (on) pill.setTypeface(Palette.bodyStrong);
+                pill.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        if (videoEngine.recording()) return;
+                        videoZoom = z;
+                        videoEngine.setZoom(z);
+                        prefs.edit().putFloat(PREF_VIDEO_ZOOM, z).apply();
+                        Journal.line(MainActivity.this, "VIDEO zoom " + z);
+                        refreshPresets();
+                        updateLabels();
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
+                lp.rightMargin = dp(10);
+                presetRow.addView(pill, lp);
+            }
+            return;
+        }
         for (final Preset p : store.list) {
             boolean on = p == active;
             LinearLayout pill = new LinearLayout(this);
@@ -636,6 +873,26 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void updateLabels() {
+        if (video) {
+            SpannableStringBuilder vz = new SpannableStringBuilder(String.format(Locale.US, "%.1f", videoZoom));
+            int st = vz.length();
+            vz.append("\u00d7");
+            vz.setSpan(new RelativeSizeSpan(0.75f), st, vz.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            vz.setSpan(new ForegroundColorSpan(Palette.MUTED), st, vz.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            zoomTitle.setText(vz);
+            SpannableStringBuilder vs = new SpannableStringBuilder("Video \u00b7 ");
+            int a = vs.length();
+            vs.append("720p ").append(String.valueOf(videoFps));
+            vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            vs.append(" \u00b7 main lens");
+            subtitle.setText(vs);
+            if (!videoEngine.recording()) {
+                SpannableStringBuilder c = new SpannableStringBuilder("720p \u00b7 " + videoFps);
+                evCaption.setText(c);
+            }
+            if (overlay != null) overlay.setFrame(new android.graphics.RectF(0f, 0f, 1f, 1f));
+            return;
+        }
         SpannableStringBuilder z = new SpannableStringBuilder(String.format(Locale.US, "%.1f", engine.getZoom()));
         int start = z.length();
         z.append("\u00d7");
@@ -685,7 +942,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         final Uri uri = Uri.parse(s);
         new Thread(new Runnable() {
             @Override public void run() {
-                final Bitmap b = loadThumb(uri);
+                final Bitmap b = lastIsVideo ? videoFrame(uri) : loadThumb(uri);
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (b == null) {
@@ -849,7 +1106,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     @Override
     public void onExposure(long exposureNs, int iso, float aperture) {
-        if (exposureNs <= 0) return;
+        if (exposureNs <= 0 || video) return;
         String shutter;
         if (exposureNs >= 500000000L) {
             shutter = String.format(Locale.US, "%.1fs", exposureNs / 1e9);
@@ -874,6 +1131,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     @Override
     public void onSaved(Uri uri, Bitmap b) {
         lastUri = uri;
+        lastIsVideo = false;
+        prefs.edit().putBoolean(PREF_LAST_VIDEO, false).apply();
         if (uri != null) prefs.edit().putString(PREF_LAST, uri.toString()).apply();
         if (b != null) thumb.setBitmap(b);
     }
@@ -888,6 +1147,13 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void openDarkroom() {
+        if (lastIsVideo && lastUri != null) {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(lastUri, "video/mp4");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            start(i);
+            return;
+        }
         if (developer.roll().isEmpty()) {
             openLast();
             return;
@@ -923,7 +1189,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             case KeyEvent.KEYCODE_CAMERA:
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
-                if (event.getRepeatCount() == 0) engine.capture();
+                if (event.getRepeatCount() == 0) press();
                 return true;
             case KeyEvent.KEYCODE_FOCUS:
                 return true;   // half-press of a shutter key; focus is continuous anyway

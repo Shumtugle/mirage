@@ -1,5 +1,17 @@
 # Changes
 
+## 0.4
+
+- Video: 720p at 120 frames a second with sound, played back at its real
+  speed, from the main lens, at 1x, 1.5x or 2x. The camera runs its
+  high-speed mode when it offers one at that size; otherwise the fastest
+  ordinary rate, and the diary says which.
+- Photo, Video and Album tabs at the bottom; the shutter turns into a record
+  button and the time runs under it.
+- Clips go to `DCIM/Mirage` beside the photos, on the phone or the card; the
+  last-shot ring plays the last clip.
+- Sound is asked for the first time video is chosen; without it, clips are silent.
+
 ## 0.3.3
 
 - Photos and variants go to `DCIM/Mirage` again, where cameras keep theirs.

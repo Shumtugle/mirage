@@ -29,6 +29,9 @@ Project page: https://shumtugle.github.io/mirage/
 The light and geometry of the variants are the same code as in the author's
 photo editor: `Light`, `Upright`, `Pose` and `Warp` are copies of its files.
 
+Video: the Video tab records 720p at 120 frames a second with sound, played
+back at real speed, at 1x, 1.5x or 2x on the main lens.
+
 Photos go to `DCIM/Mirage`, and so do the variants, each as soon as it is ready:
 on the phone's memory, or on the memory card when it is chosen in the camera's card.
 A diary of each day, plain text, goes to `Documents/Mirage`.

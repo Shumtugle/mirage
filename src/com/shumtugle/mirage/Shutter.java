@@ -9,12 +9,29 @@ import android.graphics.SweepGradient;
 import android.view.MotionEvent;
 import android.view.View;
 
-/** The shutter: a brass ring, a dark gap, a cinnabar disc that sinks when pressed. */
+/**
+ * The shutter: a brass ring, a dark gap, a cinnabar disc that sinks when
+ * pressed. For video the disc is smaller, and while recording it becomes a
+ * rounded square, the sign for stop.
+ */
 final class Shutter extends View {
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gap = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint disc = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.RectF square = new android.graphics.RectF();
     private boolean down;
+    private boolean video;
+    private boolean recording;
+
+    void setVideo(boolean v) {
+        video = v;
+        invalidate();
+    }
+
+    void setRecording(boolean r) {
+        recording = r;
+        invalidate();
+    }
 
     Shutter(Context c) {
         super(c);
@@ -37,7 +54,14 @@ final class Shutter extends View {
         float cx = getWidth() / 2f, cy = getHeight() / 2f, r = Math.min(getWidth(), getHeight()) / 2f;
         c.drawCircle(cx, cy, r, ring);
         c.drawCircle(cx, cy, r * 0.89f, gap);
-        c.drawCircle(cx, cy, r * (down ? 0.74f : 0.78f), disc);
+        if (video && recording) {
+            float h = r * 0.36f;
+            square.set(cx - h, cy - h, cx + h, cy + h);
+            c.drawRoundRect(square, h * 0.28f, h * 0.28f, disc);
+        } else {
+            float k = video ? 0.62f : 0.78f;
+            c.drawCircle(cx, cy, r * (down ? k - 0.04f : k), disc);
+        }
     }
 
     @Override
