@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.4";
+    static final String VERSION = "0.4.5";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -773,7 +773,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             if (st) steadyPill.setTypeface(Palette.bodyStrong);
             steadyPill.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
-                    if (videoEngine.recording()) return;
+                    if (videoEngine.recording() || videoEngine.starting()) return;
                     boolean on = !videoEngine.steady();
                     prefs.edit().putBoolean(PREF_STEADY, on).apply();
                     Journal.line(MainActivity.this, "STEADY " + (on ? "on" : "off"));

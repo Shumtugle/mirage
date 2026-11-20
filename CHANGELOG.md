@@ -1,5 +1,18 @@
 # Changes
 
+## 0.4.5
+
+- Steady no longer pushes a stalled camera: a clip that gets no frames is
+  dropped, the camera is opened afresh one step lower on a ladder of
+  settings (60 fps with electronic and optical stabilisation, then 30 fps
+  with both, optical only, none, and finally zoom by sensor crop), and the
+  clip starts again by itself. The step that works is kept for this build.
+- The steady preview mode is gone from the ladder.
+- A clip session that finishes building after the camera was closed or
+  switched is let go quietly instead of starting a recorder that is gone.
+- The diary notes lost buffers, aborted sequences and whether the steady
+  preview flows.
+
 ## 0.4.4
 
 - Steady records: in the ordinary session each clip now gets its own

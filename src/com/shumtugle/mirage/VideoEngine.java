@@ -102,13 +102,25 @@ final class VideoEngine {
     private volatile boolean steady;
     private int[] eisModes = new int[0];
     private int[] oisModes = new int[0];
-    /**
-     * How much stabilisation Steady asks for: 3 a steady preview and the
-     * optical lens, 2 electronic and optical, 1 optical only, 0 none. Some
-     * phones take a level for the preview but give no frames once the
-     * recorder joins; then the level steps down until frames come.
+    /*
+     * Steady is tried as a ladder of settings, from the richest down. A camera
+     * that stalls on a setting stays stalled for the whole session, so each
+     * step gets a freshly opened camera; the first step that gives frames is
+     * kept for this build and used from then on.
      */
-    private int stabLevel = 3;
+    private static final int[] STEP_FPS = {60, 30, 30, 30, 30};
+    private static final boolean[] STEP_EIS = {true, true, false, false, false};
+    private static final boolean[] STEP_OIS = {true, true, true, false, false};
+    /** Zoom by a crop of the sensor instead of the zoom ratio. */
+    private static final boolean[] STEP_CROP = {false, false, false, false, true};
+    private static final String PREF_STEP = "steady_step";
+    private static final String PREF_STEP_BUILD = "steady_step_build";
+    private int step;
+    private String cameraId;
+    /** A clip that stalled and is to be started again once the fresh camera is ready. */
+    private boolean pendingRetry;
+    private int retryRotation;
+    private boolean previewLogged;
 
     VideoEngine(Context c, Listener l) {
         context = c.getApplicationContext();
@@ -128,7 +140,23 @@ final class VideoEngine {
     /** Takes effect at the next open. */
     void setSteady(boolean on) {
         steady = on;
-        stabLevel = 3;
+    }
+
+    private void loadStep() {
+        android.content.SharedPreferences p = context.getSharedPreferences("mirage", Context.MODE_PRIVATE);
+        step = MainActivity.VERSION.equals(p.getString(PREF_STEP_BUILD, "")) ? p.getInt(PREF_STEP, 0) : 0;
+        if (step < 0 || step >= STEP_FPS.length) step = 0;
+    }
+
+    private void saveStep() {
+        context.getSharedPreferences("mirage", Context.MODE_PRIVATE).edit()
+                .putInt(PREF_STEP, step).putString(PREF_STEP_BUILD, MainActivity.VERSION).apply();
+    }
+
+    private String stepName() {
+        return "step " + step + " (" + STEP_FPS[step] + " fps"
+                + (STEP_EIS[step] ? ", electronic" : "") + (STEP_OIS[step] ? ", optical" : "")
+                + (STEP_CROP[step] ? ", crop zoom" : "") + ")";
     }
 
     boolean steady() {
@@ -169,6 +197,8 @@ final class VideoEngine {
                 fail("No rear camera");
                 return;
             }
+            cameraId = id;
+            loadStep();
             chars = manager.getCameraCharacteristics(id);
             if (Build.VERSION.SDK_INT >= 30) zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
             activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
@@ -179,7 +209,8 @@ final class VideoEngine {
             eisModes = eis == null ? new int[0] : eis;
             oisModes = ois == null ? new int[0] : ois;
             Journal.line(context, "VIDEO stabilisation offered: electronic " + Arrays.toString(eisModes)
-                    + ", optical " + Arrays.toString(oisModes) + "; steady asked " + steady);
+                    + ", optical " + Arrays.toString(oisModes) + "; steady asked " + steady
+                    + (steady ? ", " + stepName() : ""));
             chooseRates();
             manager.openCamera(id, deviceCallback, handler);
         } catch (Exception e) {
@@ -190,6 +221,8 @@ final class VideoEngine {
 
     void close() {
         if (thread == null) return;
+        pendingRetry = false;
+        starting = false;
         if (recording) stopOnThread();
         final CameraCaptureSession s = session;
         final CameraDevice d = device;
@@ -249,7 +282,7 @@ final class VideoEngine {
             Range<Integer> best = new Range<Integer>(30, 30);
             if (ranges != null) {
                 for (Range<Integer> r : ranges) {
-                    int cap = steady ? 60 : FPS;
+                    int cap = steady ? STEP_FPS[step] : FPS;
                     if (r.getLower().equals(r.getUpper()) && r.getUpper() > best.getUpper() && r.getUpper() <= cap) best = r;
                 }
                 s.append("\nordinary fps ranges ").append(Arrays.toString(ranges));
@@ -275,11 +308,15 @@ final class VideoEngine {
             Journal.line(context, "VIDEO device disconnected");
             d.close();
             device = null;
+            pendingRetry = false;
+            starting = false;
         }
         @Override public void onError(CameraDevice d, int error) {
             Journal.line(context, "VIDEO device error " + error);
             d.close();
             device = null;
+            pendingRetry = false;
+            starting = false;
             fail("Camera error " + error);
         }
     };
@@ -371,6 +408,7 @@ final class VideoEngine {
                 return;
             }
             session = s;
+            previewLogged = false;
             try {
                 repeat(false);
                 final int f = fps();
@@ -379,6 +417,10 @@ final class VideoEngine {
                         listener.onOpened(new Size(WIDTH, HEIGHT), f);
                     }
                 });
+                if (pendingRetry) {
+                    pendingRetry = false;
+                    startNow(retryRotation);
+                }
             } catch (Exception e) {
                 Journal.error(context, "video preview", e);
                 fail("Video not ready");
@@ -399,23 +441,21 @@ final class VideoEngine {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, toRecorder ? recordFps : previewFps);
+        boolean crop = false;
         if (!highSpeed && steady) {
-            // Stabilisation, only where the ordinary session can take it, at the level that gives frames.
-            if (stabLevel >= 3 && Build.VERSION.SDK_INT >= 33 && contains(eisModes,
-                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) {
-                b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION);
-            } else if (stabLevel >= 2 && contains(eisModes, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) {
+            // Stabilisation as the current step of the ladder asks.
+            if (STEP_EIS[step] && contains(eisModes, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) {
                 b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON);
             } else {
                 b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
             }
-            if (stabLevel >= 1 && contains(oisModes, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
+            if (STEP_OIS[step] && contains(oisModes, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
                 b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON);
             }
+            crop = STEP_CROP[step];
         }
         float z = Math.max(1f, zoom);
-        if (Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
+        if (!crop && Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, Math.min(z, zoomRange.getUpper()));
         } else if (activeArray != null) {
             int w = Math.round(activeArray.width() / z), h = Math.round(activeArray.height() / z);
@@ -426,7 +466,7 @@ final class VideoEngine {
             CameraConstrainedHighSpeedCaptureSession hs = (CameraConstrainedHighSpeedCaptureSession) session;
             hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), toRecorder ? resultLog : null, handler);
         } else {
-            session.setRepeatingRequest(b.build(), toRecorder ? resultLog : null, handler);
+            session.setRepeatingRequest(b.build(), toRecorder ? resultLog : (steady ? previewLog : null), handler);
         }
     }
 
@@ -449,7 +489,7 @@ final class VideoEngine {
                 String phys = res.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
                 if (phys != null) b.append(", lens in use ").append(phys);
             }
-            if (steady && !highSpeed) b.append(", steady level ").append(stabLevel);
+            if (steady && !highSpeed) b.append(", steady ").append(stepName());
             Journal.line(context, b.toString());
         }
 
@@ -457,48 +497,99 @@ final class VideoEngine {
                                               android.hardware.camera2.CaptureFailure f) {
             if (failuresLogged++ < 3) {
                 Journal.line(context, "VIDEO frame failed, reason " + f.getReason()
-                        + (steady && !highSpeed ? ", steady level " + stabLevel : ""));
+                        + (steady && !highSpeed ? ", steady " + stepName() : ""));
             }
+        }
+
+        @Override public void onCaptureBufferLost(CameraCaptureSession s, CaptureRequest r, Surface target, long frame) {
+            if (failuresLogged++ < 3) {
+                Journal.line(context, "VIDEO buffer lost on the " + (target == previewSurface ? "preview" : "recorder")
+                        + ", frame " + frame);
+            }
+        }
+
+        @Override public void onCaptureSequenceAborted(CameraCaptureSession s, int sequenceId) {
+            Journal.line(context, "VIDEO capture sequence " + sequenceId + " aborted");
+        }
+    };
+
+    /** One line from the first steady preview frame of a session: whether the preview alone flows. */
+    private final CameraCaptureSession.CaptureCallback previewLog = new CameraCaptureSession.CaptureCallback() {
+        @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult res) {
+            if (previewLogged) return;
+            previewLogged = true;
+            Journal.line(context, "VIDEO steady preview flows: fps range " + res.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)
+                    + ", electronic " + res.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
+                    + ", optical " + res.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) + ", " + stepName());
         }
     };
 
     private int failuresLogged;
 
-    /** Steps the stabilisation down while recording gives no frames. */
+    /**
+     * A clip that gives no frames has stalled the camera. Nothing sent to a
+     * stalled session helps, so the clip is dropped, the camera opened afresh
+     * at the next Steady step, and the clip started again by itself.
+     */
     private final Runnable watchFrames = new Runnable() {
         @Override public void run() {
             if (!recording || loggedResult) return;
-            if (!highSpeed && stabLevel == 0 && recordFps != null && recordFps.getUpper() > 30) {
-                // Without stabilisation and still nothing: the rate itself is too much for two streams.
-                recordFps = new Range<Integer>(30, 30);
-                previewFps = recordFps;
-                stabLevel = -1;
-                Journal.line(context, "VIDEO no frames even without stabilisation; rate down to 30");
-                try {
-                    repeat(true);
-                } catch (Exception e) {
-                    Journal.error(context, "rate step down", e);
-                }
-                final Handler h = handler;
-                if (h != null) h.postDelayed(this, 1500);
+            if (highSpeed || !steady) {
+                Journal.line(context, "VIDEO no frames reach the recorder");
                 return;
             }
-            if (!steady || highSpeed || stabLevel <= 0) {
-                Journal.line(context, "VIDEO no frames reach the recorder"
-                        + (steady && !highSpeed ? " even without stabilisation" : ""));
+            Journal.line(context, "VIDEO steady stalled at " + stepName());
+            dropClip();
+            if (step + 1 >= STEP_FPS.length) {
+                saveStep();
+                Journal.line(context, "VIDEO steady: no step gives frames");
+                reopen();
+                fail("Steady video does not work on this phone yet");
                 return;
             }
-            stabLevel--;
-            Journal.line(context, "VIDEO no frames reach the recorder; steady level down to " + stabLevel);
-            try {
-                repeat(true);
-            } catch (Exception e) {
-                Journal.error(context, "steady step down", e);
-            }
-            final Handler h = handler;
-            if (h != null) h.postDelayed(this, 1500);
+            step++;
+            saveStep();
+            Journal.line(context, "VIDEO steady: fresh camera at " + stepName() + ", the clip starts again");
+            pendingRetry = true;
+            starting = true;
+            reopen();
         }
     };
+
+    /** Forgets a clip that never got frames: no stop, no file. */
+    private void dropClip() {
+        recording = false;
+        clipSurface = null;
+        if (recorder != null) {
+            try { recorder.release(); } catch (RuntimeException ignored) { }
+            recorder = null;
+        }
+        finishOutput(false);
+    }
+
+    /** Closes the camera and opens it again, on the engine thread. */
+    @SuppressLint("MissingPermission")
+    private void reopen() {
+        final CameraCaptureSession s = session;
+        final CameraDevice d = device;
+        final Surface ps = previewSurface;
+        session = null;
+        device = null;
+        previewSurface = null;
+        try { if (s != null) s.close(); } catch (Exception ignored) { }
+        try { if (d != null) d.close(); } catch (Exception ignored) { }
+        if (ps != null) ps.release();
+        if (handler == null || cameraId == null) return;
+        try {
+            chooseRates();
+            manager.openCamera(cameraId, deviceCallback, handler);
+        } catch (Exception e) {
+            Journal.error(context, "video reopen", e);
+            pendingRetry = false;
+            starting = false;
+            fail("Video not ready");
+        }
+    }
 
     private void refresh() {
         final Handler h = handler;
@@ -547,75 +638,89 @@ final class VideoEngine {
         starting = true;
         h.post(new Runnable() {
             @Override public void run() {
-                if (session == null || recording) {
-                    starting = false;
-                    return;
-                }
-                String name = "VID_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
-                        .format(new java.util.Date()) + ".mp4";
-                try {
-                    boolean sound = withSound;
-                    recorder = newRecorder(sound);
-                    recorder.setOrientationHint((sensorOrientation + deviceRotation) % 360);
-                    if (!openOutput(name)) throw new IllegalStateException("no place for the clip");
-                    if (out != null) recorder.setOutputFile(out.getFileDescriptor());
-                    else recorder.setOutputFile(outFile.getPath());
-                    recorder.prepare();
-                    loggedResult = false;
-                    failuresLogged = 0;
-                    if (!highSpeed) {
-                        // Rebuild the session around this recorder's own surface; it starts once configured.
-                        clipSurface = recorder.getSurface();
-                        final String clip = name;
-                        final int turn = (sensorOrientation + deviceRotation) % 360;
-                        final boolean withS = sound;
-                        device.createCaptureSession(Arrays.asList(previewSurface, clipSurface),
-                                new CameraCaptureSession.StateCallback() {
-                                    @Override public void onConfigured(CameraCaptureSession s) {
-                                        session = s;
-                                        try {
-                                            repeat(true);
-                                            recorder.start();
-                                            started = System.currentTimeMillis();
-                                            recording = true;
-                                            starting = false;
-                                            h.postDelayed(watchFrames, 1500);
-                                            Journal.line(context, String.format(Locale.US,
-                                                    "RECORD start %s: %dx%d at %d fps, ordinary, own surface, zoom %.1f, sound %s, turn %d",
-                                                    clip, WIDTH, HEIGHT, fps(), zoom, withS, turn));
-                                        } catch (Exception e) {
-                                            Journal.error(context, "record start", e);
-                                            abandon();
-                                            previewOnly();
-                                            fail("Recording did not start");
-                                        }
-                                    }
-                                    @Override public void onConfigureFailed(CameraCaptureSession s) {
-                                        Journal.line(context, "RECORD session for the clip failed");
-                                        abandon();
-                                        previewOnly();
-                                        fail("Recording did not start");
-                                    }
-                                }, h);
-                        return;
-                    }
-                    repeat(true);
-                    recorder.start();
-                    started = System.currentTimeMillis();
-                    recording = true;
-                    starting = false;
-                    h.postDelayed(watchFrames, 1500);
-                    Journal.line(context, String.format(Locale.US,
-                            "RECORD start %s: %dx%d at %d fps, %s, zoom %.1f, sound %s, turn %d",
-                            name, WIDTH, HEIGHT, fps(), highSpeed ? "high-speed" : "ordinary", zoom, sound,
-                            (sensorOrientation + deviceRotation) % 360));
-                } catch (Exception e) {
-                    Journal.error(context, "record start", e);
-                    abandon();
-                    fail("Recording did not start");
-                }
+                startNow(deviceRotation);
             }
         });
+    }
+
+    /** Starts a clip on the engine thread; starting is already set. */
+    private void startNow(final int deviceRotation) {
+        final Handler h = handler;
+        if (h == null || session == null || device == null || recording) {
+            starting = false;
+            return;
+        }
+        retryRotation = deviceRotation;
+        String name = "VID_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+                .format(new java.util.Date()) + ".mp4";
+        try {
+            boolean sound = withSound;
+            recorder = newRecorder(sound);
+            recorder.setOrientationHint((sensorOrientation + deviceRotation) % 360);
+            if (!openOutput(name)) throw new IllegalStateException("no place for the clip");
+            if (out != null) recorder.setOutputFile(out.getFileDescriptor());
+            else recorder.setOutputFile(outFile.getPath());
+            recorder.prepare();
+            loggedResult = false;
+            failuresLogged = 0;
+            if (!highSpeed) {
+                // Rebuild the session around this recorder's own surface; it starts once configured.
+                final MediaRecorder mine = recorder;
+                final CameraDevice d = device;
+                clipSurface = recorder.getSurface();
+                final String clip = name;
+                final int turn = (sensorOrientation + deviceRotation) % 360;
+                final boolean withS = sound;
+                d.createCaptureSession(Arrays.asList(previewSurface, clipSurface),
+                        new CameraCaptureSession.StateCallback() {
+                            @Override public void onConfigured(CameraCaptureSession s) {
+                                if (recorder != mine || device != d || !starting) {
+                                    // Closed or switched while the session was built.
+                                    s.close();
+                                    return;
+                                }
+                                session = s;
+                                try {
+                                    repeat(true);
+                                    mine.start();
+                                    started = System.currentTimeMillis();
+                                    recording = true;
+                                    starting = false;
+                                    h.postDelayed(watchFrames, 1500);
+                                    Journal.line(context, String.format(Locale.US,
+                                            "RECORD start %s: %dx%d at %d fps, ordinary, own surface, zoom %.1f, sound %s, turn %d, %s",
+                                            clip, WIDTH, HEIGHT, fps(), zoom, withS, turn, stepName()));
+                                } catch (Exception e) {
+                                    Journal.error(context, "record start", e);
+                                    abandon();
+                                    previewOnly();
+                                    fail("Recording did not start");
+                                }
+                            }
+                            @Override public void onConfigureFailed(CameraCaptureSession s) {
+                                if (recorder != mine || device != d) return;
+                                Journal.line(context, "RECORD session for the clip failed");
+                                abandon();
+                                previewOnly();
+                                fail("Recording did not start");
+                            }
+                        }, h);
+                return;
+            }
+            repeat(true);
+            recorder.start();
+            started = System.currentTimeMillis();
+            recording = true;
+            starting = false;
+            h.postDelayed(watchFrames, 1500);
+            Journal.line(context, String.format(Locale.US,
+                    "RECORD start %s: %dx%d at %d fps, high-speed, zoom %.1f, sound %s, turn %d",
+                    name, WIDTH, HEIGHT, fps(), zoom, sound, (sensorOrientation + deviceRotation) % 360));
+        } catch (Exception e) {
+            Journal.error(context, "record start", e);
+            abandon();
+            fail("Recording did not start");
+        }
     }
 
     void stop() {
@@ -735,7 +840,7 @@ final class VideoEngine {
 
     /** Back to the preview alone, in the ordinary session. */
     private void previewOnly() {
-        if (device == null || previewSurface == null) return;
+        if (device == null || previewSurface == null || handler == null) return;
         try {
             device.createCaptureSession(Arrays.asList(previewSurface), sessionCallback, handler);
         } catch (Exception e) {
