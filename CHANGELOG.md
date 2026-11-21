@@ -1,5 +1,14 @@
 # Changes
 
+## 0.4.6
+
+- The step of the steady ladder that works is kept across new versions;
+  it is forgotten only when the ladder itself changes.
+- Before a steady clip rebuilds the session, the preview texture is held at
+  the video size, so the preview stream cannot take the view's own shape.
+- The diary notes the preview transform once before a clip and once while
+  it records.
+
 ## 0.4.5
 
 - Steady no longer pushes a stalled camera: a clip that gets no frames is

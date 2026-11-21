@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.5";
+    static final String VERSION = "0.4.6";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -84,6 +84,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private LinearLayout column;
     private ImageView ambient;
     private TextureView preview;
+    /** Note the preview's transform once in the diary: before a clip and while it records. */
+    private boolean matrixPreview;
+    private boolean matrixRecord;
     private Overlay overlay;
     private LinearLayout presetRow;
     private TextView zoomTitle;
@@ -387,7 +390,15 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 if (video) VideoEngine.holdBufferSize(st);
             }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) { return true; }
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture st) { }
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                if (!video || videoEngine == null) return;
+                boolean rec = videoEngine.recording();
+                if (rec ? matrixRecord : matrixPreview) {
+                    if (rec) matrixRecord = false;
+                    else matrixPreview = false;
+                    logMatrix(st, rec);
+                }
+            }
         });
         card.addView(preview, matchParent());
 
@@ -544,11 +555,26 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             stopTimer();
             setControlsEnabled(true);
         } else {
+            matrixRecord = true;
+            matrixPreview = true;
             videoEngine.start(deviceRotation);
             shutterButton.setRecording(true);
             setControlsEnabled(false);
             main.postDelayed(timer, 250);
         }
+    }
+
+    /**
+     * The texture's transform carries the crop and turn the camera asks for;
+     * a preview that looks squeezed shows it here as unequal scales.
+     */
+    private void logMatrix(SurfaceTexture st, boolean rec) {
+        float[] m = new float[16];
+        st.getTransformMatrix(m);
+        Journal.line(this, String.format(Locale.US,
+                "PREVIEW %s: view %dx%d, matrix a %.3f b %.3f c %.3f d %.3f tx %.3f ty %.3f, steady %s",
+                rec ? "while recording" : "before recording", preview.getWidth(), preview.getHeight(),
+                m[0], m[1], m[4], m[5], m[12], m[13], videoEngine.steady()));
     }
 
     private void setControlsEnabled(boolean on) {
@@ -587,6 +613,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private final VideoEngine.Listener videoListener = new VideoEngine.Listener() {
         @Override public void onOpened(Size previewSize, int fps) {
             opened = true;
+            matrixPreview = true;
             videoFps = fps;
             updateLabels();
             main.removeCallbacks(ambientTick);

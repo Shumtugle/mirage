@@ -106,7 +106,8 @@ final class VideoEngine {
      * Steady is tried as a ladder of settings, from the richest down. A camera
      * that stalls on a setting stays stalled for the whole session, so each
      * step gets a freshly opened camera; the first step that gives frames is
-     * kept for this build and used from then on.
+     * kept and used from then on, across new versions, until the ladder
+     * itself changes.
      */
     private static final int[] STEP_FPS = {60, 30, 30, 30, 30};
     private static final boolean[] STEP_EIS = {true, true, false, false, false};
@@ -115,6 +116,10 @@ final class VideoEngine {
     private static final boolean[] STEP_CROP = {false, false, false, false, true};
     private static final String PREF_STEP = "steady_step";
     private static final String PREF_STEP_BUILD = "steady_step_build";
+    /** Names the ladder above; a step kept under another name is not trusted. */
+    private static final String LADDER = "ladder-1";
+    /** The same ladder, as it was named when steps were kept per version. */
+    private static final String LADDER_BEFORE = "0.4.5";
     private int step;
     private String cameraId;
     /** A clip that stalled and is to be started again once the fresh camera is ready. */
@@ -144,13 +149,14 @@ final class VideoEngine {
 
     private void loadStep() {
         android.content.SharedPreferences p = context.getSharedPreferences("mirage", Context.MODE_PRIVATE);
-        step = MainActivity.VERSION.equals(p.getString(PREF_STEP_BUILD, "")) ? p.getInt(PREF_STEP, 0) : 0;
+        String kept = p.getString(PREF_STEP_BUILD, "");
+        step = LADDER.equals(kept) || LADDER_BEFORE.equals(kept) ? p.getInt(PREF_STEP, 0) : 0;
         if (step < 0 || step >= STEP_FPS.length) step = 0;
     }
 
     private void saveStep() {
         context.getSharedPreferences("mirage", Context.MODE_PRIVATE).edit()
-                .putInt(PREF_STEP, step).putString(PREF_STEP_BUILD, MainActivity.VERSION).apply();
+                .putInt(PREF_STEP, step).putString(PREF_STEP_BUILD, LADDER).apply();
     }
 
     private String stepName() {
@@ -671,6 +677,10 @@ final class VideoEngine {
                 final String clip = name;
                 final int turn = (sensorOrientation + deviceRotation) % 360;
                 final boolean withS = sound;
+                // The preview stream takes its size from the texture when the session
+                // is built; make sure it is the video size and not the view's own.
+                final SurfaceTexture tex = texture;
+                if (tex != null) tex.setDefaultBufferSize(WIDTH, HEIGHT);
                 d.createCaptureSession(Arrays.asList(previewSurface, clipSurface),
                         new CameraCaptureSession.StateCallback() {
                             @Override public void onConfigured(CameraCaptureSession s) {
