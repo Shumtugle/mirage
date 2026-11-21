@@ -1,5 +1,11 @@
 # Changes
 
+## 0.4.8
+
+- Video brightness is kept between launches: it is there again every time
+  video is turned on, until it is changed or given back to the camera with
+  a double tap.
+
 ## 0.4.7
 
 - Brightness in video, also while a clip records: the minus and plus

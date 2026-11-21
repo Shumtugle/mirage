@@ -83,14 +83,17 @@ final class VideoEngine {
     private Range<Float> zoomRange;
     /*
      * Brightness is the camera's exposure compensation, counted in its own
-     * steps. It lives as long as the app does and carries over every new
-     * session, so it can be changed while a clip records.
+     * steps. It carries over every new session, so it can be changed while a
+     * clip records; the screen keeps it in stops between launches.
      */
     private Range<Integer> evRange;
     private Rational evStep;
     private volatile int evSteps;
     /** When to note in the diary what the camera made of a new brightness. */
     private volatile long evCheckAt;
+    /** Brightness in stops handed over before the camera's steps are known. */
+    private float evWanted;
+    private boolean evPlaced;
     private Rect activeArray;
     private int sensorOrientation = 90;
     private boolean highSpeed;
@@ -221,6 +224,11 @@ final class VideoEngine {
             activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             evRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
             evStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+            if (!evPlaced && evRange != null && evStep != null && evStep.floatValue() > 0f) {
+                evPlaced = true;
+                int s = Math.round(evWanted / evStep.floatValue());
+                evSteps = Math.max(evRange.getLower(), Math.min(evRange.getUpper(), s));
+            }
             Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             sensorOrientation = so == null ? 90 : so;
             int[] eis = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
@@ -574,6 +582,11 @@ final class VideoEngine {
         if (evRange == null || evStep == null || evStep.floatValue() <= 0f) return false;
         int per = Math.max(1, Math.round((1f / 3f) / evStep.floatValue()));
         return setEvSteps(evSteps + thirds * per);
+    }
+
+    /** Brightness kept from an earlier launch, in stops; placed at the next open. */
+    void restoreEv(float stops) {
+        evWanted = stops;
     }
 
     /** Brightness back to what the camera meters by itself. */

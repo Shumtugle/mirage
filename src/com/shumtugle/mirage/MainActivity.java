@@ -65,10 +65,11 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.7";
+    static final String VERSION = "0.4.8";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
+    private static final String PREF_VIDEO_EV = "video_ev";
     private static final String PREF_LAST = "last";
     private static final String PREF_FRAME_X = "frame_x";
     private static final String PREF_FRAME_Y = "frame_y";
@@ -143,6 +144,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         engine = new CameraEngine(this, this);
         developer = Developer.get(this);
         videoEngine = new VideoEngine(this, videoListener);
+        videoEngine.restoreEv(prefs.getFloat(PREF_VIDEO_EV, 0f));
         video = "video".equals(prefs.getString(PREF_MODE, "photo"));
         videoZoom = prefs.getFloat(PREF_VIDEO_ZOOM, 2f);
         videoEngine.setZoom(videoZoom);
@@ -587,6 +589,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void brightnessChanged() {
+        prefs.edit().putFloat(PREF_VIDEO_EV, videoEngine.ev()).apply();
         if (evCaption != null) evCaption.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
         updateLabels();
         if (videoEngine.recording()) showRecordingTime();
