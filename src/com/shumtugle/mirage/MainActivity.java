@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.6";
+    static final String VERSION = "0.4.7";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -154,8 +154,6 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
         buildUi();
         if (video) {
-            minusButton.setAlpha(0.35f);
-            plusButton.setAlpha(0.35f);
             wbIcon.setAlpha(0.35f);
             wbCaption.setAlpha(0.35f);
         }
@@ -436,7 +434,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         TextView minus = roundButton("\u2212");
         minusButton = minus;
         minus.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { if (!video) { engine.stepEv(-1); updateLabels(); } }
+            @Override public void onClick(View v) { stepBrightness(-1, "button"); }
         });
         row.addView(cell(minus, 58, 25, null, null));
         row.addView(spacer());
@@ -454,7 +452,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         TextView plus = roundButton("+");
         plusButton = plus;
         plus.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { if (!video) { engine.stepEv(1); updateLabels(); } }
+            @Override public void onClick(View v) { stepBrightness(1, "button"); }
         });
         row.addView(cell(plus, 58, 25, null, null));
         row.addView(spacer());
@@ -517,8 +515,6 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         overlay.setFocus(-1f, -1f, false);
         exposureChip.setVisibility(View.INVISIBLE);
         float dim = video ? 0.35f : 1f;
-        minusButton.setAlpha(dim);
-        plusButton.setAlpha(dim);
         wbIcon.setAlpha(dim);
         wbCaption.setAlpha(dim);
         fillNav();
@@ -577,6 +573,32 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 m[0], m[1], m[4], m[5], m[12], m[13], videoEngine.steady()));
     }
 
+    /** The minus and plus buttons: exposure in photo, brightness in video, even while it records. */
+    private void stepBrightness(int direction, String how) {
+        if (!video) {
+            engine.stepEv(direction);
+            updateLabels();
+            return;
+        }
+        if (videoEngine.nudgeEv(direction)) {
+            brightnessChanged();
+            Journal.line(this, String.format(Locale.US, "VIDEO ev %+.2f by %s", videoEngine.ev(), how));
+        }
+    }
+
+    private void brightnessChanged() {
+        if (evCaption != null) evCaption.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        updateLabels();
+        if (videoEngine.recording()) showRecordingTime();
+    }
+
+    /** Brightness for the video labels; empty when the camera meters by itself. */
+    private String videoEvText() {
+        float ev = videoEngine.ev();
+        if (Math.abs(ev) < 0.05f) return "";
+        return String.format(Locale.US, "%+.1f EV", ev);
+    }
+
     private void setControlsEnabled(boolean on) {
         nav.setAlpha(on ? 1f : 0.4f);
         presetRow.setAlpha(on ? 1f : 0.4f);
@@ -594,12 +616,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 setControlsEnabled(true);
                 return;
             }
-            long s = videoEngine.elapsedMs() / 1000;
-            SpannableStringBuilder t = new SpannableStringBuilder(
-                    String.format(Locale.US, "\u25cf %02d:%02d", s / 60, s % 60));
-            t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            t.setSpan(new ForegroundColorSpan(Palette.INK), 1, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            evCaption.setText(t);
+            showRecordingTime();
             main.postDelayed(this, 250);
         }
     };
@@ -608,6 +625,22 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         main.removeCallbacks(timer);
         if (shutterButton != null) shutterButton.setRecording(false);
         if (nav != null) setControlsEnabled(true);
+    }
+
+    /** The running time under the shutter, with the brightness when it is not the camera's own. */
+    private void showRecordingTime() {
+        long s = videoEngine.elapsedMs() / 1000;
+        SpannableStringBuilder t = new SpannableStringBuilder(
+                String.format(Locale.US, "\u25cf %02d:%02d", s / 60, s % 60));
+        t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        t.setSpan(new ForegroundColorSpan(Palette.INK), 1, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        String ev = videoEvText();
+        if (ev.length() > 0) {
+            int a = t.length();
+            t.append(" \u00b7 ").append(ev);
+            t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        evCaption.setText(t);
     }
 
     private final VideoEngine.Listener videoListener = new VideoEngine.Listener() {
@@ -669,6 +702,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
      * On the viewfinder: drag the frame, tap to focus and meter there, press
      * and hold to lock focus and exposure there, double tap to bring the frame
      * back to the middle and give focus back to the camera, pinch to zoom.
+     * In video the viewfinder is a brightness slider: a finger moving up, as
+     * the phone is held, makes it brighter, down darker; a double tap gives
+     * brightness back to the camera. It works while a clip records.
      */
     private void attachGestures(final View target) {
         final ScaleGestureDetector pinch = new ScaleGestureDetector(this,
@@ -701,12 +737,62 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 overlay.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
             }
         });
+        final GestureDetector videoTaps = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onDoubleTap(MotionEvent e) {
+                if (videoEngine.resetEv()) {
+                    brightnessChanged();
+                    Journal.line(MainActivity.this, "VIDEO ev back to the camera's own");
+                }
+                return true;
+            }
+        });
         final float slop = android.view.ViewConfiguration.get(this).getScaledTouchSlop();
+        final float third = dp(28);
         target.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY, startX, startY;
             boolean inFrame;
+            int turn, thirds;
+            boolean evMoved;
             @Override public boolean onTouch(View v, MotionEvent e) {
-                if (video) return true;
+                if (video) {
+                    videoTaps.onTouchEvent(e);
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downX = e.getX();
+                            downY = e.getY();
+                            turn = deviceRotation;
+                            thirds = 0;
+                            evMoved = false;
+                            break;
+                        case MotionEvent.ACTION_MOVE: {
+                            if (e.getPointerCount() > 1) break;
+                            float dx = e.getX() - downX, dy = e.getY() - downY;
+                            // Up as the phone is held: the screen's top, its left or right edge, or its bottom.
+                            float up = turn == 90 ? -dx : turn == 180 ? dy : turn == 270 ? dx : -dy;
+                            int want = (int) (up / third);
+                            while (thirds != want) {
+                                int by = want > thirds ? 1 : -1;
+                                thirds += by;
+                                if (videoEngine.nudgeEv(by)) {
+                                    evMoved = true;
+                                    brightnessChanged();
+                                }
+                            }
+                            break;
+                        }
+                        case MotionEvent.ACTION_UP:
+                        case MotionEvent.ACTION_CANCEL:
+                            if (evMoved) {
+                                Journal.line(MainActivity.this, String.format(Locale.US,
+                                        "VIDEO ev %+.2f by a slide", videoEngine.ev()));
+                            }
+                            evMoved = false;
+                            break;
+                        default:
+                            break;
+                    }
+                    return true;
+                }
                 pinch.onTouchEvent(e);
                 taps.onTouchEvent(e);
                 switch (e.getActionMasked()) {
@@ -950,9 +1036,22 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             vs.append("720p ").append(String.valueOf(videoFps));
             vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             vs.append(videoEngine.steady() ? " \u00b7 steady" : " \u00b7 main lens");
+            String vev = videoEvText();
+            if (vev.length() > 0) {
+                vs.append(" \u00b7 ");
+                int b = vs.length();
+                vs.append(vev);
+                vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), b, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
             subtitle.setText(vs);
             if (!videoEngine.recording()) {
                 SpannableStringBuilder c = new SpannableStringBuilder("720p \u00b7 " + videoFps);
+                if (vev.length() > 0) {
+                    c.append(" \u00b7 ");
+                    int b = c.length();
+                    c.append(vev);
+                    c.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), b, c.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
                 evCaption.setText(c);
             }
             if (overlay != null) overlay.setFrame(new android.graphics.RectF(0f, 0f, 1f, 1f));

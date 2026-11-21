@@ -1,5 +1,17 @@
 # Changes
 
+## 0.4.7
+
+- Brightness in video, also while a clip records: the minus and plus
+  buttons move it by a third of a stop, and the viewfinder is a slider -
+  a finger going up, as the phone is held, makes the picture brighter,
+  down darker. A double tap on the viewfinder gives brightness back to
+  the camera. It holds for every clip until the app is closed.
+- The brightness shows under the shutter and in the line under the zoom
+  when it is not the camera's own.
+- The diary notes each change and what the camera made of it a moment
+  later.
+
 ## 0.4.6
 
 - The step of the steady ladder that works is kept across new versions;

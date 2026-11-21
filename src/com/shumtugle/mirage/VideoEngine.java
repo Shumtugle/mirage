@@ -28,6 +28,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.util.Range;
+import android.util.Rational;
 import android.util.Size;
 import android.view.Surface;
 
@@ -80,6 +81,16 @@ final class VideoEngine {
     private SurfaceTexture texture;
     private CameraCharacteristics chars;
     private Range<Float> zoomRange;
+    /*
+     * Brightness is the camera's exposure compensation, counted in its own
+     * steps. It lives as long as the app does and carries over every new
+     * session, so it can be changed while a clip records.
+     */
+    private Range<Integer> evRange;
+    private Rational evStep;
+    private volatile int evSteps;
+    /** When to note in the diary what the camera made of a new brightness. */
+    private volatile long evCheckAt;
     private Rect activeArray;
     private int sensorOrientation = 90;
     private boolean highSpeed;
@@ -208,6 +219,8 @@ final class VideoEngine {
             chars = manager.getCameraCharacteristics(id);
             if (Build.VERSION.SDK_INT >= 30) zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
             activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            evRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+            evStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
             Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             sensorOrientation = so == null ? 90 : so;
             int[] eis = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
@@ -460,6 +473,10 @@ final class VideoEngine {
             }
             crop = STEP_CROP[step];
         }
+        if (evRange != null) {
+            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                    Math.max(evRange.getLower(), Math.min(evRange.getUpper(), evSteps)));
+        }
         float z = Math.max(1f, zoom);
         if (!crop && Build.VERSION.SDK_INT >= 30 && zoomRange != null) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, Math.min(z, zoomRange.getUpper()));
@@ -470,9 +487,9 @@ final class VideoEngine {
         }
         if (highSpeed) {
             CameraConstrainedHighSpeedCaptureSession hs = (CameraConstrainedHighSpeedCaptureSession) session;
-            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), toRecorder ? resultLog : null, handler);
+            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), toRecorder ? resultLog : evLog, handler);
         } else {
-            session.setRepeatingRequest(b.build(), toRecorder ? resultLog : (steady ? previewLog : null), handler);
+            session.setRepeatingRequest(b.build(), toRecorder ? resultLog : (steady ? previewLog : evLog), handler);
         }
     }
 
@@ -481,6 +498,7 @@ final class VideoEngine {
     /** One line from the first recorded frame: what the camera really does while recording. */
     private final CameraCaptureSession.CaptureCallback resultLog = new CameraCaptureSession.CaptureCallback() {
         @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult res) {
+            checkEv(res);
             if (loggedResult) return;
             loggedResult = true;
             StringBuilder b = new StringBuilder("VIDEO frame: exposure ")
@@ -489,7 +507,8 @@ final class VideoEngine {
                     .append(res.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)).append(", crop ")
                     .append(res.get(CaptureResult.SCALER_CROP_REGION))
                     .append(", electronic stabilisation ").append(res.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE))
-                    .append(", optical ").append(res.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE));
+                    .append(", optical ").append(res.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE))
+                    .append(", ev comp ").append(res.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION));
             if (Build.VERSION.SDK_INT >= 30) b.append(", zoom ratio ").append(res.get(CaptureResult.CONTROL_ZOOM_RATIO));
             if (Build.VERSION.SDK_INT >= 29) {
                 String phys = res.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
@@ -522,6 +541,7 @@ final class VideoEngine {
     /** One line from the first steady preview frame of a session: whether the preview alone flows. */
     private final CameraCaptureSession.CaptureCallback previewLog = new CameraCaptureSession.CaptureCallback() {
         @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult res) {
+            checkEv(res);
             if (previewLogged) return;
             previewLogged = true;
             Journal.line(context, "VIDEO steady preview flows: fps range " + res.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)
@@ -529,6 +549,52 @@ final class VideoEngine {
                     + ", optical " + res.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) + ", " + stepName());
         }
     };
+
+    /** Watches the preview only for what a new brightness does. */
+    private final CameraCaptureSession.CaptureCallback evLog = new CameraCaptureSession.CaptureCallback() {
+        @Override public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest r, TotalCaptureResult res) {
+            checkEv(res);
+        }
+    };
+
+    /** A breath after brightness changed: what the camera reports it does now. */
+    private void checkEv(TotalCaptureResult res) {
+        long at = evCheckAt;
+        if (at == 0 || System.currentTimeMillis() < at) return;
+        evCheckAt = 0;
+        Journal.line(context, String.format(Locale.US,
+                "VIDEO ev %+.2f asked (%d steps): comp %s, exposure %s ns, ISO %s, %s, %s",
+                ev(), evSteps, res.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION),
+                res.get(CaptureResult.SENSOR_EXPOSURE_TIME), res.get(CaptureResult.SENSOR_SENSITIVITY),
+                highSpeed ? "high-speed" : "ordinary", recording ? "recording" : "preview"));
+    }
+
+    /** Brightness up or down by thirds of a stop, as near as the camera's steps allow. */
+    boolean nudgeEv(int thirds) {
+        if (evRange == null || evStep == null || evStep.floatValue() <= 0f) return false;
+        int per = Math.max(1, Math.round((1f / 3f) / evStep.floatValue()));
+        return setEvSteps(evSteps + thirds * per);
+    }
+
+    /** Brightness back to what the camera meters by itself. */
+    boolean resetEv() {
+        return setEvSteps(0);
+    }
+
+    private boolean setEvSteps(int s) {
+        if (evRange != null) s = Math.max(evRange.getLower(), Math.min(evRange.getUpper(), s));
+        if (s == evSteps) return false;
+        evSteps = s;
+        evCheckAt = System.currentTimeMillis() + 700;
+        refresh();
+        return true;
+    }
+
+    /** Brightness in stops; 0 when the camera meters by itself. */
+    float ev() {
+        Rational st = evStep;
+        return st == null ? 0f : evSteps * st.floatValue();
+    }
 
     private int failuresLogged;
 
