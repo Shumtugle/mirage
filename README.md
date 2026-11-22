@@ -1,5 +1,9 @@
 # Mirage
 
+> **0.5.2 is the last version under this name.** The camera continues as the
+> front of a larger photo application, in a private repository. This
+> repository stays as it is.
+
 A small Android camera with presets. It always shoots on the main rear lens
 and opens at the default preset, which is 2× out of the box.
 
