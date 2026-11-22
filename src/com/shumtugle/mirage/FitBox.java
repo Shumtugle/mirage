@@ -12,9 +12,16 @@ import android.widget.FrameLayout;
 final class FitBox extends FrameLayout {
     /** Width over height of the child. */
     private float ratio = 3f / 4f;
+    /** Pressed to the top instead of centred. */
+    private boolean top;
 
     FitBox(Context c) {
         super(c);
+    }
+
+    void setTop(boolean t) {
+        top = t;
+        requestLayout();
     }
 
     void setRatio(float widthOverHeight) {
@@ -46,7 +53,7 @@ final class FitBox extends FrameLayout {
         int cw = child.getMeasuredWidth(), ch = child.getMeasuredHeight();
         int w = r - l - getPaddingLeft() - getPaddingRight();
         int h = b - t - getPaddingTop() - getPaddingBottom();
-        int left = getPaddingLeft() + (w - cw) / 2, top = getPaddingTop() + (h - ch) / 2;
-        child.layout(left, top, left + cw, top + ch);
+        int left = getPaddingLeft() + (w - cw) / 2, y = getPaddingTop() + (top ? 0 : (h - ch) / 2);
+        child.layout(left, y, left + cw, y + ch);
     }
 }

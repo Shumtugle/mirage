@@ -6,55 +6,54 @@ import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Shader;
 import android.view.View;
 
-/** The last photo, cut to a circle inside a brass ring with a soft halo. */
+/** The last photo, cut to a rounded square under a fine glass edge. */
 final class Thumb extends View {
-    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint empty = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint image = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final RectF box = new RectF();
+    private final Matrix m = new Matrix();
     private Bitmap bitmap;
 
     Thumb(Context c) {
         super(c);
-        ring.setStyle(Paint.Style.STROKE);
-        ring.setColor(Palette.BRASS);
-        halo.setColor(Palette.alpha(Palette.BRASS, 0.12f));
-        empty.setColor(Palette.RAISED);
+        edge.setStyle(Paint.Style.STROKE);
+        edge.setColor(Palette.alpha(Palette.INK, 0.35f));
+        empty.setColor(Palette.alpha(Palette.INK, 0.08f));
         setClickable(true);
+        setContentDescription("Last shot");
     }
 
     void setBitmap(Bitmap b) {
         bitmap = b;
-        if (b != null) {
-            image.setShader(new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
-        } else {
-            image.setShader(null);
-        }
+        image.setShader(b != null ? new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP) : null);
         invalidate();
     }
 
     @Override
     protected void onDraw(Canvas c) {
         float d = getResources().getDisplayMetrics().density;
-        float cx = getWidth() / 2f, cy = getHeight() / 2f, r = Math.min(getWidth(), getHeight()) / 2f;
-        c.drawCircle(cx, cy, r, halo);
-        float rr = r - 4 * d;
-        ring.setStrokeWidth(2 * d);
-        float inner = rr - 4 * d;
+        float s = Math.min(getWidth(), getHeight());
+        float left = (getWidth() - s) / 2f, top = (getHeight() - s) / 2f;
+        float r = 16f * d;
+        box.set(left, top, left + s, top + s);
         if (bitmap != null) {
-            // centre-crop the photo into the inner circle
-            float scale = 2 * inner / Math.min(bitmap.getWidth(), bitmap.getHeight());
-            Matrix m = new Matrix();
+            // centre-crop the photo into the square
+            float scale = s / Math.min(bitmap.getWidth(), bitmap.getHeight());
             m.setScale(scale, scale);
-            m.postTranslate(cx - bitmap.getWidth() * scale / 2f, cy - bitmap.getHeight() * scale / 2f);
+            m.postTranslate(left + s / 2f - bitmap.getWidth() * scale / 2f, top + s / 2f - bitmap.getHeight() * scale / 2f);
             image.getShader().setLocalMatrix(m);
-            c.drawCircle(cx, cy, inner, image);
+            c.drawRoundRect(box, r, r, image);
         } else {
-            c.drawCircle(cx, cy, inner, empty);
+            c.drawRoundRect(box, r, r, empty);
         }
-        c.drawCircle(cx, cy, rr, ring);
+        edge.setStrokeWidth(Math.max(1f, d));
+        float h = edge.getStrokeWidth() / 2f;
+        box.inset(h, h);
+        c.drawRoundRect(box, r, r, edge);
     }
 }

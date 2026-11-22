@@ -68,6 +68,8 @@ final class Developer {
     private final List<Variant> roll = new ArrayList<Variant>();
     private Listener listener;
     private boolean developing;
+    /** Whether a shot is developed into variants at all, or only saved as it is. */
+    private volatile boolean variants = true;
 
     static synchronized Developer get(Context c) {
         if (instance == null) instance = new Developer(c.getApplicationContext());
@@ -77,6 +79,14 @@ final class Developer {
     private Developer(Context c) {
         context = c;
         dir = new File(c.getCacheDir(), "darkroom");
+    }
+
+    void setVariants(boolean on) {
+        variants = on;
+    }
+
+    boolean variants() {
+        return variants;
     }
 
     void setListener(Listener l) {
@@ -169,6 +179,13 @@ final class Developer {
                 }
             }
         });
+
+        if (!variants) {
+            log("VARIANTS off: the shot alone");
+            if (full != null) full.recycle();
+            finishRoll();
+            return;
+        }
 
         // 3. The readings, from a small copy.
         if (full == null) full = Saver.upright(original, 1);

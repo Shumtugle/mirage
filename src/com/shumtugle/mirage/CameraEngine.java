@@ -162,6 +162,13 @@ final class CameraEngine {
         refresh();
     }
 
+    /** Exposure up or down by thirds of a stop, as near as the camera's steps allow. */
+    void nudgeEv(int thirds) {
+        if (evStep == null || evStep.floatValue() <= 0f) return;
+        int per = Math.max(1, Math.round((1f / 3f) / evStep.floatValue()));
+        for (int i = 0; i < Math.abs(thirds) * per; i++) stepEv(thirds > 0 ? 1 : -1);
+    }
+
     void cycleWb() {
         wb = (wb + 1) % WB_MODES.length;
         refresh();

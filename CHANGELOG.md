@@ -1,5 +1,26 @@
 # Changes
 
+## 0.5.0
+
+- A new look. The viewfinder runs from edge to edge, pressed to the top of
+  the screen; the zoom stands over it in large light figures with one line
+  of monospaced facts below.
+- Everything else floats on frosted glass: presets or zooms and the shutter
+  row in one panel, and Photo, Video, Album under a glass drop that slides
+  to the one chosen. Where the panel lies over the picture, it is frosted
+  with the picture itself.
+- The shutter ring shimmers and slowly turns; it turns faster while a clip
+  records. A recording clip shows a red edge around the picture and its time
+  floating at the top.
+- Brightness is a rail on the right edge with a small sun that rides up and
+  down. In photo the rail is a slider and a double tap on it gives
+  brightness back to the camera; in video the whole viewfinder stays the
+  slider.
+- A ball on a spring at the top right: left keeps only the shot, the middle
+  also develops its variants, a push to the right opens this camera's card.
+- The photo frame is a fine rounded line; type is one grotesque and its
+  monospaced sibling.
+
 ## 0.4.8
 
 - Video brightness is kept between launches: it is there again every time

@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.4.8";
+    static final String VERSION = "0.5.0";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -82,7 +82,19 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private FrameLayout root;
-    private LinearLayout column;
+    private FrameLayout viewfinder;
+    private LinearLayout hud;
+    private Detent detent;
+    private Rail rail;
+    private View recEdge;
+    private TextView recPill;
+    private FrameLayout dock;
+    private ImageView frost;
+    private FrameLayout modeBar;
+    private View modeKnob;
+    private final TextView[] modeLabels = new TextView[3];
+    private int insetTop;
+    private int insetBottom;
     private ImageView ambient;
     private TextureView preview;
     /** Note the preview's transform once in the diary: before a clip and while it records. */
@@ -93,13 +105,10 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private TextView zoomTitle;
     private TextView subtitle;
     private TextView exposureChip;
-    private TextView evCaption;
-    private TextView wbCaption;
     private TextView minusButton;
     private TextView plusButton;
     private Shutter shutterButton;
     private FitBox fit;
-    private LinearLayout nav;
 
     /** Photo or video; video has its own engine and its own zooms. */
     private boolean video;
@@ -114,7 +123,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private static final String PREF_VIDEO_ZOOM = "video_zoom";
     private static final String PREF_STEADY = "steady";
     private static final String PREF_LAST_VIDEO = "last_video";
-    private WbIcon wbIcon;
+    private TextView wbButton;
+    private static final String PREF_VARIANTS = "variants";
     private Thumb thumb;
 
     private Uri lastUri;
@@ -143,6 +153,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         store = new PresetStore(this);
         engine = new CameraEngine(this, this);
         developer = Developer.get(this);
+        developer.setVariants(prefs.getBoolean(PREF_VARIANTS, true));
         videoEngine = new VideoEngine(this, videoListener);
         videoEngine.restoreEv(prefs.getFloat(PREF_VIDEO_EV, 0f));
         video = "video".equals(prefs.getString(PREF_MODE, "photo"));
@@ -155,10 +166,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         engine.applyPreset(active);   // the very first frame is already at the default zoom
 
         buildUi();
-        if (video) {
-            wbIcon.setAlpha(0.35f);
-            wbCaption.setAlpha(0.35f);
-        }
+        if (video) wbButton.setAlpha(0.35f);
         restoreLastShot();
 
         orientation = new OrientationEventListener(this) {
@@ -195,6 +203,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         opened = false;
         developer.setListener(null);
         main.removeCallbacks(ambientTick);
+        main.removeCallbacks(frostTick);
         orientation.disable();
         engine.close();
         videoEngine.close();
@@ -247,6 +256,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     // ------------------------------------------------------------------ UI
 
+    /** Where the floating parts sit above the bottom edge, before the system bar's own height. */
+    private static final int MODE_H_DP = 50;
+    private static final int MODE_BOTTOM_DP = 18;
+    private static final int DOCK_ABOVE_MODE_DP = 14;
+
     private void buildUi() {
         root = new FrameLayout(this);
         root.setBackgroundColor(Palette.BG);
@@ -258,63 +272,40 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         root.addView(ambient, matchParent());
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{
-                Palette.alpha(Palette.BG, 0.55f), Palette.alpha(Palette.BG, 0.35f),
-                Palette.alpha(Palette.BG, 0.82f), Palette.alpha(Palette.BG, 0.95f)}));
+                Palette.alpha(Palette.BG, 0.35f), Palette.alpha(Palette.BG, 0.55f),
+                Palette.alpha(Palette.BG, 0.85f), Palette.alpha(Palette.BG, 0.95f)}));
         root.addView(shade, matchParent());
 
-        column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        root.addView(column, matchParent());
-
-        column.addView(buildHeader());
-
+        // The viewfinder from edge to edge, pressed to the top, under the status bar.
         fit = new FitBox(this);
+        fit.setTop(true);
         fit.setRatio(video ? 9f / 16f : 3f / 4f);
-        fit.setPadding(dp(16), 0, dp(16), 0);
         fit.addView(buildViewfinder());
-        column.addView(fit, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(fit, matchParent());
 
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setFillViewport(true);
-        presetRow = new LinearLayout(this);
-        presetRow.setOrientation(LinearLayout.HORIZONTAL);
-        presetRow.setGravity(Gravity.CENTER);
-        presetRow.setPadding(dp(16), 0, dp(16), 0);
-        scroll.addView(presetRow, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(16);
-        column.addView(scroll, sl);
+        root.addView(buildDock(), dockParams());
+        root.addView(buildModeBar(), modeParams());
 
-        LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        cl.topMargin = dp(14);
-        column.addView(buildControls(), cl);
-
-        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        nl.gravity = Gravity.CENTER_HORIZONTAL;
-        nl.topMargin = dp(10);
-        nl.bottomMargin = dp(8);
-        column.addView(buildNav(), nl);
-
-        // The window draws behind the system bars: the column steps clear of them.
+        // The window draws behind the system bars: the floating parts step clear of them.
         root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
-                int t, b;
                 if (Build.VERSION.SDK_INT >= 30) {
                     android.graphics.Insets s = in.getInsets(WindowInsets.Type.systemBars()
                             | WindowInsets.Type.displayCutout());
-                    t = s.top;
-                    b = s.bottom;
+                    insetTop = s.top;
+                    insetBottom = s.bottom;
                 } else {
-                    t = in.getSystemWindowInsetTop();
-                    b = in.getSystemWindowInsetBottom();
+                    insetTop = in.getSystemWindowInsetTop();
+                    insetBottom = in.getSystemWindowInsetBottom();
                 }
-                column.setPadding(0, t, 0, b);
+                placeInsets();
                 return in;
+            }
+        });
+        // Where the panel lies over the picture it is frosted with that picture.
+        root.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                main.post(overlapCheck);
             }
         });
 
@@ -334,51 +325,38 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         updateLabels();
     }
 
-    private View buildHeader() {
-        FrameLayout head = new FrameLayout(this);
-        head.setPadding(dp(28), dp(10), dp(24), dp(14));
+    private void placeInsets() {
+        topMargin(hud, insetTop + dp(14));
+        topMargin(detent, insetTop + dp(18));
+        topMargin(recPill, insetTop + dp(122));
+        topMargin(rail, insetTop + dp(124));
+        FrameLayout.LayoutParams dl = (FrameLayout.LayoutParams) dock.getLayoutParams();
+        dl.bottomMargin = insetBottom + dp(MODE_BOTTOM_DP + MODE_H_DP + DOCK_ABOVE_MODE_DP);
+        dock.setLayoutParams(dl);
+        FrameLayout.LayoutParams ml = (FrameLayout.LayoutParams) modeBar.getLayoutParams();
+        ml.bottomMargin = insetBottom + dp(MODE_BOTTOM_DP);
+        modeBar.setLayoutParams(ml);
+    }
 
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        zoomTitle = new TextView(this);
-        zoomTitle.setTypeface(Palette.display);
-        zoomTitle.setTextColor(Palette.INK);
-        zoomTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 48);
-        zoomTitle.setIncludeFontPadding(false);
-        texts.addView(zoomTitle);
-        subtitle = text(13.5f, Palette.MUTED);
-        subtitle.setPadding(0, dp(6), 0, 0);
-        texts.addView(subtitle);
-        head.addView(texts, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.START | Gravity.TOP));
-
-        // The app's own sign is the way into its settings and its facts.
-        FrameLayout logo = new FrameLayout(this);
-        logo.setBackground(oval(Palette.alpha(Palette.RAISED, 0.75f)));
-        logo.setElevation(dp(6));
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(R.mipmap.ic_launcher);
-        logo.addView(icon, new FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER));
-        logo.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { showInfo(); }
-        });
-        FrameLayout.LayoutParams ll = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.END | Gravity.TOP);
-        ll.topMargin = dp(4);
-        head.addView(logo, ll);
-        return head;
+    private static void topMargin(View v, int px) {
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+        if (lp.topMargin == px) return;
+        lp.topMargin = px;
+        v.setLayoutParams(lp);
     }
 
     private View buildViewfinder() {
         FrameLayout card = new FrameLayout(this);
+        viewfinder = card;
         card.setBackgroundColor(Color.BLACK);
-        final float radius = dp(30);
+        final float radius = dp(36);
         card.setOutlineProvider(new ViewOutlineProvider() {
             @Override public void getOutline(View v, Outline o) {
-                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
+                // Square at the top, where the screen's own edge is; round at the bottom.
+                o.setRoundRect(0, -Math.round(radius), v.getWidth(), v.getHeight(), radius);
             }
         });
         card.setClipToOutline(true);
-        card.setElevation(dp(10));
 
         preview = new TextureView(this);
         preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
@@ -408,37 +386,205 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         card.addView(overlay, matchParent());
         attachGestures(card);
 
-        exposureChip = text(12.5f, Palette.MUTED);
+        // A shade under the numbers at the top, so they read over a bright sky.
+        View scrim = new View(this);
+        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{
+                Palette.alpha(Palette.BG, 0.55f), Palette.alpha(Palette.BG, 0f)}));
+        card.addView(scrim, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(200), Gravity.TOP));
+
+        hud = new LinearLayout(this);
+        hud.setOrientation(LinearLayout.VERTICAL);
+        zoomTitle = new TextView(this);
+        zoomTitle.setTypeface(Palette.display);
+        zoomTitle.setTextColor(Palette.INK);
+        zoomTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 56);
+        zoomTitle.setIncludeFontPadding(false);
+        zoomTitle.setLetterSpacing(-0.03f);
+        zoomTitle.setShadowLayer(dp(10), 0, dp(1), 0x73000000);
+        hud.addView(zoomTitle);
+        subtitle = new TextView(this);
+        subtitle.setTypeface(Palette.mono);
+        subtitle.setTextColor(Palette.alpha(Palette.INK, 0.82f));
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        subtitle.setLetterSpacing(0.04f);
+        subtitle.setAllCaps(true);
+        subtitle.setShadowLayer(dp(8), 0, dp(1), 0x73000000);
+        subtitle.setPadding(0, dp(8), 0, 0);
+        hud.addView(subtitle);
+        FrameLayout.LayoutParams hl = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+        hl.leftMargin = dp(22);
+        hl.rightMargin = dp(140);
+        card.addView(hud, hl);
+
+        // The ball: left keeps only the shot, the middle develops variants too, a push right opens this camera's card.
+        detent = new Detent(this, developer.variants() ? Detent.MIDDLE : Detent.LEFT,
+                new String[]{"Variants after the shot: off", "Variants after the shot: on"},
+                new Detent.Listener() {
+                    @Override public void settled(int place) {
+                        boolean on = place == Detent.MIDDLE;
+                        developer.setVariants(on);
+                        prefs.edit().putBoolean(PREF_VARIANTS, on).apply();
+                        Journal.line(MainActivity.this, "VARIANTS " + (on ? "on" : "off"));
+                    }
+
+                    @Override public void sprung() {
+                        showInfo();
+                    }
+                });
+        FrameLayout.LayoutParams dtl = new FrameLayout.LayoutParams(dp(112), dp(44), Gravity.TOP | Gravity.END);
+        dtl.rightMargin = dp(16);
+        card.addView(detent, dtl);
+
+        exposureChip = new TextView(this);
+        exposureChip.setTypeface(Palette.mono);
+        exposureChip.setTextColor(Palette.alpha(Palette.INK, 0.82f));
+        exposureChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         exposureChip.setPadding(dp(13), dp(7), dp(13), dp(7));
-        exposureChip.setBackground(rounded(Palette.alpha(Palette.BG, 0.55f), dp(16)));
+        exposureChip.setBackground(glassChip(dp(16)));
         exposureChip.setVisibility(View.INVISIBLE);
         FrameLayout.LayoutParams el = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.START | Gravity.BOTTOM);
         el.leftMargin = dp(16);
         el.bottomMargin = dp(16);
         card.addView(exposureChip, el);
+
+        rail = new Rail(this);
+        rail.setTouchable(!video);
+        rail.setListener(new Rail.Listener() {
+            private int done;
+
+            @Override public void moved(int thirds) {
+                if (video) return;
+                int by = thirds - done;
+                done = thirds;
+                if (by == 0) return;
+                engine.nudgeEv(by);
+                rail.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                updateLabels();
+            }
+
+            @Override public void released() {
+                if (!video && done != 0) {
+                    Journal.line(MainActivity.this, String.format(Locale.US, "EV %+.2f by the rail", engine.getEv()));
+                }
+                done = 0;
+            }
+
+            @Override public void reset() {
+                if (video) return;
+                for (int i = 0; i < 64 && Math.abs(engine.getEv()) > 0.01f; i++) {
+                    engine.stepEv(engine.getEv() > 0f ? -1 : 1);
+                }
+                rail.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                Journal.line(MainActivity.this, "EV back to the camera's own by the rail");
+                updateLabels();
+            }
+        });
+        FrameLayout.LayoutParams rl = new FrameLayout.LayoutParams(dp(170), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END);
+        rl.rightMargin = dp(12);
+        rl.bottomMargin = dp(70);
+        card.addView(rail, rl);
+
+        // While a clip records the picture's edge glows red and the time floats over it.
+        recEdge = new View(this);
+        GradientDrawable edge = new GradientDrawable();
+        edge.setColor(Color.TRANSPARENT);
+        edge.setStroke(dp(3), Palette.alpha(Palette.ACCENT, 0.85f));
+        edge.setCornerRadii(new float[]{0, 0, 0, 0, radius, radius, radius, radius});
+        recEdge.setBackground(edge);
+        recEdge.setVisibility(View.GONE);
+        card.addView(recEdge, matchParent());
+
+        recPill = new TextView(this);
+        recPill.setTypeface(Palette.mono);
+        recPill.setTextColor(Palette.INK);
+        recPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        recPill.setPadding(dp(14), dp(7), dp(14), dp(7));
+        recPill.setBackground(glassChip(dp(18)));
+        recPill.setVisibility(View.GONE);
+        card.addView(recPill, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
         return card;
+    }
+
+    /** A small floating chip: a dark tint for reading under a pane of glass. */
+    private android.graphics.drawable.Drawable glassChip(float radius) {
+        return new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{
+                rounded(Palette.alpha(Palette.BG, 0.38f), radius), new Glass(radius, Math.max(1f, dp(1)), 1f)});
+    }
+
+    /** The floating panel: presets or zooms above, the shutter row below. */
+    private View buildDock() {
+        dock = new FrameLayout(this);
+        final float r = dp(38);
+        dock.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View v, Outline o) {
+                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), r);
+            }
+        });
+        dock.setClipToOutline(true);
+        frost = new ImageView(this);
+        frost.setScaleType(ImageView.ScaleType.FIT_XY);
+        frost.setVisibility(View.GONE);
+        dock.addView(frost, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 0, Gravity.TOP));
+        View tint = new View(this);
+        tint.setBackgroundColor(Palette.alpha(Palette.BG, 0.3f));
+        dock.addView(tint, matchParent());
+        View pane = new View(this);
+        pane.setBackground(new Glass(r, Math.max(1f, dp(1)), 1f));
+        dock.addView(pane, matchParent());
+
+        LinearLayout inner = new LinearLayout(this);
+        inner.setOrientation(LinearLayout.VERTICAL);
+        inner.setPadding(dp(14), dp(14), dp(14), dp(16));
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(true);
+        presetRow = new LinearLayout(this);
+        presetRow.setOrientation(LinearLayout.HORIZONTAL);
+        presetRow.setGravity(Gravity.CENTER);
+        scroll.addView(presetRow, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        inner.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cl.topMargin = dp(14);
+        inner.addView(buildControls(), cl);
+        dock.addView(inner, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        return dock;
+    }
+
+    private FrameLayout.LayoutParams dockParams() {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        lp.leftMargin = dp(14);
+        lp.rightMargin = dp(14);
+        lp.bottomMargin = dp(MODE_BOTTOM_DP + MODE_H_DP + DOCK_ABOVE_MODE_DP);
+        return lp;
     }
 
     private View buildControls() {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.TOP);
-        row.setPadding(dp(12 * k), 0, dp(12 * k), 0);
+        row.setGravity(Gravity.CENTER_VERTICAL);
 
         thumb = new Thumb(this);
         thumb.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { openDarkroom(); }
         });
-        row.addView(cell(thumb, 80, 14, text(12.5f, Palette.MUTED), "Last"));
+        row.addView(thumb, square(50));
         row.addView(spacer());
 
         TextView minus = roundButton("\u2212");
+        minus.setContentDescription("Darker");
         minusButton = minus;
         minus.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { stepBrightness(-1, "button"); }
         });
-        row.addView(cell(minus, 58, 25, null, null));
+        row.addView(minus, square(46));
         row.addView(spacer());
 
         Shutter shutter = new Shutter(this);
@@ -447,53 +593,157 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         shutter.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { press(); }
         });
-        evCaption = text(12.5f, Palette.MUTED);
-        row.addView(cell(shutter, 108, 0, evCaption, null));
+        row.addView(shutter, square(84));
         row.addView(spacer());
 
         TextView plus = roundButton("+");
+        plus.setContentDescription("Brighter");
         plusButton = plus;
         plus.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { stepBrightness(1, "button"); }
         });
-        row.addView(cell(plus, 58, 25, null, null));
+        row.addView(plus, square(46));
         row.addView(spacer());
 
-        wbIcon = new WbIcon(this);
-        wbIcon.setOnClickListener(new View.OnClickListener() {
+        wbButton = new TextView(this);
+        wbButton.setTypeface(Palette.mono);
+        wbButton.setTextColor(Palette.alpha(Palette.INK, 0.82f));
+        wbButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        wbButton.setGravity(Gravity.CENTER);
+        GradientDrawable wb = new GradientDrawable();
+        wb.setColor(Color.TRANSPARENT);
+        wb.setCornerRadius(dp(16));
+        wb.setStroke(Math.max(1, dp(1)), Palette.GLASS_EDGE);
+        wbButton.setBackground(wb);
+        wbButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { if (!video) { engine.cycleWb(); updateLabels(); } }
         });
-        wbCaption = text(12.5f, Palette.ACCENT_TEXT);
-        row.addView(cell(wbIcon, 72, 18, wbCaption, null));
+        row.addView(wbButton, square(50));
         return row;
     }
 
-    private View buildNav() {
-        nav = new LinearLayout(this);
-        nav.setOrientation(LinearLayout.HORIZONTAL);
-        fillNav();
-        return nav;
+    private LinearLayout.LayoutParams square(int sizeDp) {
+        return new LinearLayout.LayoutParams(dp(sizeDp * k), dp(sizeDp * k));
     }
 
-    private void fillNav() {
-        nav.removeAllViews();
-        TextView photo = navPill("Photo", !video);
-        TextView clip = navPill("Video", video);
-        TextView album = navPill("Album", false);
-        photo.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { setMode(false); }
-        });
-        clip.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { setMode(true); }
-        });
-        album.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { openAlbum(); }
-        });
-        int w = dp(Math.min(118f, (getResources().getDisplayMetrics().widthPixels
-                / getResources().getDisplayMetrics().density - 24f) / 3f));
-        nav.addView(photo, new LinearLayout.LayoutParams(w, dp(50)));
-        nav.addView(clip, new LinearLayout.LayoutParams(w, dp(50)));
-        nav.addView(album, new LinearLayout.LayoutParams(w, dp(50)));
+    /** Photo, Video, Album under a glass drop that slides to the one chosen. */
+    private View buildModeBar() {
+        modeBar = new FrameLayout(this);
+        modeBar.setBackground(new Glass(999f, Math.max(1f, dp(1)), 0.45f));
+        modeKnob = new View(this);
+        modeKnob.setBackground(new Glass(999f, Math.max(1f, dp(1)), 1.5f));
+        FrameLayout.LayoutParams kl = new FrameLayout.LayoutParams(dp(84), dp(40), Gravity.START | Gravity.CENTER_VERTICAL);
+        kl.leftMargin = dp(4);
+        modeBar.addView(modeKnob, kl);
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.HORIZONTAL);
+        String[] names = {"Photo", "Video", "Album"};
+        for (int i = 0; i < 3; i++) {
+            final int which = i;
+            TextView t = text(15f, Palette.INK);
+            t.setTypeface(Palette.bodyStrong);
+            t.setText(names[i]);
+            t.setGravity(Gravity.CENTER);
+            t.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (which == 0) setMode(false);
+                    else if (which == 1) setMode(true);
+                    else openAlbum();
+                }
+            });
+            labels.addView(t, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            modeLabels[i] = t;
+        }
+        modeBar.addView(labels, matchParent());
+        placeModeKnob(false);
+        return modeBar;
+    }
+
+    private FrameLayout.LayoutParams modeParams() {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(264), dp(MODE_H_DP),
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin = dp(MODE_BOTTOM_DP);
+        return lp;
+    }
+
+    private void placeModeKnob(boolean animate) {
+        float x = video ? dp(86) : 0f;
+        if (animate) {
+            modeKnob.animate().translationX(x).setDuration(300)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator(2f)).start();
+        } else {
+            modeKnob.setTranslationX(x);
+        }
+        for (int i = 0; i < 3; i++) {
+            boolean on = i == (video ? 1 : 0);
+            modeLabels[i].setTextColor(on ? Palette.INK : Palette.alpha(Palette.INK, 0.72f));
+        }
+    }
+
+    /** Where the panel overlaps the picture, the frost under it is made of that part of the picture. */
+    private final Runnable overlapCheck = new Runnable() {
+        @Override public void run() {
+            if (viewfinder == null || dock == null || viewfinder.getHeight() == 0) return;
+            int vfTop = fit.getTop() + viewfinder.getTop();
+            int vfBottom = vfTop + viewfinder.getHeight();
+            int vfLeft = fit.getLeft() + viewfinder.getLeft();
+            int over = Math.min(vfBottom, dock.getBottom()) - dock.getTop();
+            int railBottom = over > dp(4) ? over + dp(24) : dp(70);
+            FrameLayout.LayoutParams rl = (FrameLayout.LayoutParams) rail.getLayoutParams();
+            if (rl.bottomMargin != railBottom) {
+                rl.bottomMargin = railBottom;
+                rail.setLayoutParams(rl);
+            }
+            if (over <= dp(4)) {
+                if (frost.getVisibility() != View.GONE) frost.setVisibility(View.GONE);
+                return;
+            }
+            float vh = viewfinder.getHeight(), vw = viewfinder.getWidth();
+            frostFrom = (dock.getTop() - vfTop) / vh;
+            frostTo = (dock.getTop() + over - vfTop) / vh;
+            frostLeft = (dock.getLeft() - vfLeft) / vw;
+            frostRight = (dock.getRight() - vfLeft) / vw;
+            FrameLayout.LayoutParams fl = (FrameLayout.LayoutParams) frost.getLayoutParams();
+            if (fl.height != over || frost.getVisibility() != View.VISIBLE) {
+                fl.height = over;
+                frost.setLayoutParams(fl);
+                frost.setVisibility(View.VISIBLE);
+                main.removeCallbacks(frostTick);
+                main.post(frostTick);
+            }
+        }
+    };
+
+    private float frostFrom, frostTo, frostLeft, frostRight;
+
+    /** The frost follows the picture a few times a second, from a copy a couple of dozen pixels wide. */
+    private final Runnable frostTick = new Runnable() {
+        @Override public void run() {
+            if (!opened || !preview.isAvailable() || frost.getVisibility() != View.VISIBLE) return;
+            int vw = viewfinder.getWidth(), vh = viewfinder.getHeight();
+            if (vw > 0 && vh > 0) {
+                int bw = 24, bh = Math.max(8, Math.round(24f * vh / vw));
+                Bitmap tiny = preview.getBitmap(bw, bh);
+                if (tiny != null) {
+                    int y0 = Math.max(0, Math.min(bh - 1, Math.round(bh * frostFrom)));
+                    int y1 = Math.max(y0 + 1, Math.min(bh, Math.round(bh * frostTo)));
+                    int x0 = Math.max(0, Math.min(bw - 1, Math.round(bw * frostLeft)));
+                    int x1 = Math.max(x0 + 1, Math.min(bw, Math.round(bw * frostRight)));
+                    Bitmap band = Bitmap.createBitmap(tiny, x0, y0, x1 - x0, y1 - y0);
+                    BitmapDrawable d = new BitmapDrawable(getResources(), band);
+                    d.setFilterBitmap(true);
+                    frost.setImageDrawable(d);
+                }
+            }
+            main.postDelayed(this, 150);
+        }
+    };
+
+    /** The look of a running clip: the red edge and the floating time, or neither. */
+    private void showRecordingLook(boolean on) {
+        recEdge.setVisibility(on ? View.VISIBLE : View.GONE);
+        recPill.setVisibility(on ? View.VISIBLE : View.GONE);
+        hud.setAlpha(on ? 0.6f : 1f);
     }
 
     // ------------------------------------------------------------ photo / video
@@ -516,10 +766,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         shutterButton.setRecording(false);
         overlay.setFocus(-1f, -1f, false);
         exposureChip.setVisibility(View.INVISIBLE);
-        float dim = video ? 0.35f : 1f;
-        wbIcon.setAlpha(dim);
-        wbCaption.setAlpha(dim);
-        fillNav();
+        wbButton.setAlpha(video ? 0.35f : 1f);
+        rail.setTouchable(!video);
+        placeModeKnob(true);
         refreshPresets();
         updateLabels();
         if (video) askAudioOnce();
@@ -551,13 +800,14 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             videoEngine.stop();
             shutterButton.setRecording(false);
             stopTimer();
-            setControlsEnabled(true);
         } else {
             matrixRecord = true;
             matrixPreview = true;
             videoEngine.start(deviceRotation);
             shutterButton.setRecording(true);
             setControlsEnabled(false);
+            showRecordingLook(true);
+            showRecordingTime();
             main.postDelayed(timer, 250);
         }
     }
@@ -590,7 +840,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     private void brightnessChanged() {
         prefs.edit().putFloat(PREF_VIDEO_EV, videoEngine.ev()).apply();
-        if (evCaption != null) evCaption.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        if (rail != null) rail.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
         updateLabels();
         if (videoEngine.recording()) showRecordingTime();
     }
@@ -603,7 +853,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void setControlsEnabled(boolean on) {
-        nav.setAlpha(on ? 1f : 0.4f);
+        modeBar.setAlpha(on ? 1f : 0.4f);
         presetRow.setAlpha(on ? 1f : 0.4f);
     }
 
@@ -617,6 +867,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 updateLabels();
                 if (shutterButton != null) shutterButton.setRecording(false);
                 setControlsEnabled(true);
+                showRecordingLook(false);
                 return;
             }
             showRecordingTime();
@@ -627,15 +878,18 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private void stopTimer() {
         main.removeCallbacks(timer);
         if (shutterButton != null) shutterButton.setRecording(false);
-        if (nav != null) setControlsEnabled(true);
+        if (modeBar != null) {
+            setControlsEnabled(true);
+            showRecordingLook(false);
+        }
     }
 
-    /** The running time under the shutter, with the brightness when it is not the camera's own. */
+    /** The running time over the picture, with the brightness when it is not the camera's own. */
     private void showRecordingTime() {
         long s = videoEngine.elapsedMs() / 1000;
         SpannableStringBuilder t = new SpannableStringBuilder(
                 String.format(Locale.US, "\u25cf %02d:%02d", s / 60, s % 60));
-        t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        t.setSpan(new ForegroundColorSpan(Palette.ACCENT), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         t.setSpan(new ForegroundColorSpan(Palette.INK), 1, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         String ev = videoEvText();
         if (ev.length() > 0) {
@@ -643,7 +897,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             t.append(" \u00b7 ").append(ev);
             t.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, t.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-        evCaption.setText(t);
+        recPill.setText(t);
     }
 
     private final VideoEngine.Listener videoListener = new VideoEngine.Listener() {
@@ -853,15 +1107,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             for (int i = 0; i < VideoEngine.ZOOMS.length; i++) {
                 final float z = VideoEngine.ZOOMS[i];
                 boolean on = Math.abs(z - videoZoom) < 0.01f;
-                TextView pill = text(17, Palette.INK);
-                pill.setText(names.get(i));
-                pill.setGravity(Gravity.CENTER);
-                pill.setPadding(dp(20), 0, dp(20), 0);
-                pill.setMinimumWidth(dp(78));
-                GradientDrawable bg = rounded(on ? Palette.RAISED : Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
-                bg.setStroke(on ? dp(1.5f) : dp(1), on ? Palette.BRASS : Palette.LINE);
-                pill.setBackground(bg);
-                if (on) pill.setTypeface(Palette.bodyStrong);
+                TextView pill = bead(names.get(i), on, false);
                 pill.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View v) {
                         if (videoEngine.recording()) return;
@@ -873,20 +1119,13 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                         updateLabels();
                     }
                 });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
-                lp.rightMargin = dp(10);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+                lp.rightMargin = dp(8);
                 presetRow.addView(pill, lp);
             }
             // Steady: an ordinary session with the phone's stabilisation, at up to 60 frames.
             final boolean st = videoEngine.steady();
-            TextView steadyPill = text(17, st ? Palette.INK : Palette.MUTED);
-            steadyPill.setText("Steady");
-            steadyPill.setGravity(Gravity.CENTER);
-            steadyPill.setPadding(dp(18), 0, dp(18), 0);
-            GradientDrawable sbg = rounded(st ? Palette.RAISED : Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
-            sbg.setStroke(st ? dp(1.5f) : dp(1), st ? Palette.ACCENT_TEXT : Palette.LINE);
-            steadyPill.setBackground(sbg);
-            if (st) steadyPill.setTypeface(Palette.bodyStrong);
+            TextView steadyPill = bead("steady", st, true);
             steadyPill.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     if (videoEngine.recording() || videoEngine.starting()) return;
@@ -902,7 +1141,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                     }
                 }
             });
-            presetRow.addView(steadyPill, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)));
+            presetRow.addView(steadyPill, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)));
             return;
         }
         for (final Preset p : store.list) {
@@ -910,14 +1149,10 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             LinearLayout pill = new LinearLayout(this);
             pill.setOrientation(LinearLayout.HORIZONTAL);
             pill.setGravity(Gravity.CENTER);
-            pill.setPadding(dp(20), 0, dp(20), 0);
-            pill.setMinimumWidth(dp(78));
-            GradientDrawable bg = rounded(on ? Palette.RAISED : Palette.alpha(Palette.SURFACE, 0.6f), dp(23));
-            bg.setStroke(on ? dp(1.5f) : dp(1), on ? Palette.BRASS : Palette.LINE);
-            pill.setBackground(bg);
-            TextView name = text(17, Palette.INK);
-            name.setText(p.name);
-            if (on) name.setTypeface(Palette.bodyStrong);
+            pill.setPadding(dp(14), 0, dp(14), 0);
+            pill.setMinimumWidth(dp(56));
+            pill.setBackground(beadBackground(on, false));
+            TextView name = beadText(p.name, on, false);
             pill.addView(name);
             if (p.isDefault) {
                 View dot = new View(this);
@@ -932,20 +1167,49 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             pill.setOnLongClickListener(new View.OnLongClickListener() {
                 @Override public boolean onLongClick(View v) { presetMenu(p); return true; }
             });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
-            lp.rightMargin = dp(10);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+            lp.rightMargin = dp(8);
             presetRow.addView(pill, lp);
         }
-        TextView add = text(22, Palette.MUTED);
+        TextView add = text(20, Palette.alpha(Palette.INK, 0.72f));
         add.setText("+");
+        add.setContentDescription("New preset from what is set now");
         add.setGravity(Gravity.CENTER);
-        GradientDrawable abg = oval(Palette.alpha(Palette.SURFACE, 0.6f));
-        abg.setStroke(dp(1), Palette.LINE);
+        GradientDrawable abg = oval(Color.TRANSPARENT);
+        abg.setStroke(Math.max(1, dp(1)), Palette.alpha(Palette.INK, 0.14f));
         add.setBackground(abg);
         add.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { addFromCurrent(); }
         });
-        presetRow.addView(add, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        presetRow.addView(add, new LinearLayout.LayoutParams(dp(44), dp(44)));
+    }
+
+    /** A glass bead: clear when not chosen, lit when chosen; amber for a switch that is on. */
+    private TextView bead(String label, boolean on, boolean amber) {
+        TextView t = beadText(label, on, amber);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(14), 0, dp(14), 0);
+        t.setMinimumWidth(dp(56));
+        t.setBackground(beadBackground(on, amber));
+        return t;
+    }
+
+    private TextView beadText(String label, boolean on, boolean amber) {
+        TextView t = new TextView(this);
+        t.setTypeface(Palette.mono);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        t.setText(label);
+        t.setTextColor(on ? (amber ? Palette.ACCENT_TEXT : Palette.INK) : Palette.alpha(Palette.INK, 0.72f));
+        return t;
+    }
+
+    private GradientDrawable beadBackground(boolean on, boolean amber) {
+        int tone = amber ? Palette.ACCENT_TEXT : Palette.INK;
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(22));
+        g.setColor(on ? Palette.alpha(tone, amber ? 0.16f : 0.18f) : Color.TRANSPARENT);
+        g.setStroke(Math.max(1, dp(1)), on ? Palette.alpha(tone, amber ? 0.8f : 0.55f) : Palette.alpha(Palette.INK, 0.14f));
+        return g;
     }
 
     private void select(Preset p) {
@@ -1027,18 +1291,17 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private void updateLabels() {
+        float zoom = video ? videoZoom : engine.getZoom();
+        SpannableStringBuilder z = new SpannableStringBuilder(String.format(Locale.US, "%.1f", zoom));
+        int start = z.length();
+        z.append("\u00d7");
+        z.setSpan(new RelativeSizeSpan(0.47f), start, z.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        z.setSpan(new ForegroundColorSpan(Palette.alpha(Palette.INK, 0.7f)), start, z.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        zoomTitle.setText(z);
+
         if (video) {
-            SpannableStringBuilder vz = new SpannableStringBuilder(String.format(Locale.US, "%.1f", videoZoom));
-            int st = vz.length();
-            vz.append("\u00d7");
-            vz.setSpan(new RelativeSizeSpan(0.75f), st, vz.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            vz.setSpan(new ForegroundColorSpan(Palette.MUTED), st, vz.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            zoomTitle.setText(vz);
-            SpannableStringBuilder vs = new SpannableStringBuilder("Video \u00b7 ");
-            int a = vs.length();
-            vs.append("720p ").append(String.valueOf(videoFps));
-            vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            vs.append(videoEngine.steady() ? " \u00b7 steady" : " \u00b7 main lens");
+            SpannableStringBuilder vs = new SpannableStringBuilder("Video \u00b7 720p " + videoFps);
+            if (videoEngine.steady()) vs.append(" \u00b7 steady");
             String vev = videoEvText();
             if (vev.length() > 0) {
                 vs.append(" \u00b7 ");
@@ -1047,48 +1310,35 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 vs.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), b, vs.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
             subtitle.setText(vs);
-            if (!videoEngine.recording()) {
-                SpannableStringBuilder c = new SpannableStringBuilder("720p \u00b7 " + videoFps);
-                if (vev.length() > 0) {
-                    c.append(" \u00b7 ");
-                    int b = c.length();
-                    c.append(vev);
-                    c.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), b, c.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                }
-                evCaption.setText(c);
-            }
+            float ev = videoEngine.ev();
+            rail.show(ev / 2f, vev.length() > 0 ? vev : "\u00b10 EV", vev.length() > 0);
+            wbButton.setText("AWB");
             if (overlay != null) overlay.setFrame(new android.graphics.RectF(0f, 0f, 1f, 1f));
             return;
         }
-        SpannableStringBuilder z = new SpannableStringBuilder(String.format(Locale.US, "%.1f", engine.getZoom()));
-        int start = z.length();
-        z.append("\u00d7");
-        z.setSpan(new RelativeSizeSpan(0.75f), start, z.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        z.setSpan(new ForegroundColorSpan(Palette.MUTED), start, z.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        zoomTitle.setText(z);
 
-        String wb = CameraEngine.WB_LABELS[engine.getWb()];
         SpannableStringBuilder s = new SpannableStringBuilder(
                 String.format(Locale.US, "In a %.1f\u00d7 view", engine.viewZoom()));
         int mp = engine.photoMegapixels();
-        if (mp > 0) {
+        if (mp > 0) s.append(" \u00b7 ").append(String.valueOf(mp)).append(" MP");
+        s.append(" \u00b7 ").append(CameraEngine.WB_LABELS[engine.getWb()]);
+        float ev = engine.getEv();
+        boolean moved = Math.abs(ev) >= 0.05f;
+        if (moved) {
             s.append(" \u00b7 ");
-            int a = s.length();
-            s.append(mp + " MP");
-            s.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), a, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int b = s.length();
+            s.append(evText());
+            s.setSpan(new ForegroundColorSpan(Palette.ACCENT_TEXT), b, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-        s.append(" \u00b7 ").append(wb).append(" \u00b7 ").append(evText());
         subtitle.setText(s);
-
-        SpannableStringBuilder e = new SpannableStringBuilder(evText());
-        int cut = e.length() - 3;   // the number in ink, the unit muted
-        e.setSpan(new ForegroundColorSpan(Palette.INK), 0, cut, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        evCaption.setText(e);
-
-        wbIcon.setMode(engine.getWb());
-        wbCaption.setText(wb);
+        rail.show(ev / 2f, evText(), moved);
+        wbButton.setText(WB_SHORT[engine.getWb()]);
+        wbButton.setContentDescription("White balance: " + CameraEngine.WB_LABELS[engine.getWb()]);
         if (overlay != null) overlay.setFrame(engine.frameInView());
     }
+
+    /** White balance in a word short enough for its button. */
+    private static final String[] WB_SHORT = {"AWB", "SUN", "CLOUD", "LAMP", "FLUO"};
 
     private String storageLabel() {
         if (!Saver.wantsCard(this)) return "Photos: phone memory";
@@ -1184,7 +1434,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24), dp(22), dp(24), dp(18));
-        box.setBackground(rounded(Palette.SURFACE, dp(28)));
+        GradientDrawable card = rounded(0xF2141110, dp(28));
+        card.setStroke(Math.max(1, dp(1)), Palette.GLASS_EDGE);
+        box.setBackground(card);
 
         TextView title = new TextView(this);
         title.setTypeface(Palette.display);
@@ -1235,7 +1487,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             box.addView(store, stl);
         }
         TextView hint = text(13f, Palette.HINT);
-        hint.setText("On the viewfinder: drag the frame, tap to focus, hold to lock focus and exposure, double tap to start over.");
+        hint.setText("On the viewfinder: drag the frame, tap to focus, hold to lock focus and exposure, double tap to start over. "
+                + "The rail on the right edge is brightness: slide it, double tap it to give brightness back. "
+                + "The ball at the top: left keeps only the shot, the middle develops its variants too, a push right opens this card.");
         hint.setPadding(0, dp(10), 0, 0);
         box.addView(hint);
 
@@ -1367,26 +1621,6 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     // ---------------------------------------------------------------- helpers
 
-    /** A square control with an optional caption, nudged down so all centres share one line. */
-    private View cell(View control, int sizeDp, int topDp, TextView caption, String captionText) {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setGravity(Gravity.CENTER_HORIZONTAL);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(sizeDp * k), dp(sizeDp * k));
-        lp.topMargin = dp(topDp * k);
-        c.addView(control, lp);
-        if (caption != null) {
-            if (captionText != null) caption.setText(captionText);
-            caption.setPadding(0, dp(8), 0, 0);
-            caption.setGravity(Gravity.CENTER);
-            caption.setSingleLine(true);
-            caption.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            c.addView(caption, new LinearLayout.LayoutParams(dp(Math.max(sizeDp, 84) * k),
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-        }
-        return c;
-    }
-
     private View spacer() {
         View v = new View(this);
         v.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
@@ -1402,11 +1636,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     }
 
     private TextView roundButton(String label) {
-        TextView b = text(26, Palette.INK);
+        TextView b = text(22, Palette.INK);
+        b.setTypeface(Palette.display);
         b.setText(label);
         b.setGravity(Gravity.CENTER);
-        b.setBackground(oval(Palette.RAISED));
-        b.setElevation(dp(5));
+        b.setBackground(oval(Palette.alpha(Palette.INK, 0.08f)));
         return b;
     }
 
@@ -1416,7 +1650,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
         t.setGravity(Gravity.CENTER);
         if (on) {
             t.setTypeface(Palette.bodyStrong);
-            t.setBackground(rounded(Palette.RAISED, dp(25)));
+            t.setBackground(new Glass(dp(25), Math.max(1f, dp(1)), 1.5f));
         }
         return t;
     }
