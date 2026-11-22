@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.5.1";
+    static final String VERSION = "0.5.2";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -89,7 +89,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     private View recEdge;
     private TextView recPill;
     private FrameLayout dock;
-    private ImageView frost;
+    private final Frost frost = new Frost();
+    private boolean frostOn;
     private FrameLayout modeBar;
     private View modeKnob;
     private final TextView[] modeLabels = new TextView[3];
@@ -524,18 +525,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             }
         });
         dock.setClipToOutline(true);
-        // The frost fills the panel but is painted only over the part that lies on the picture;
-        // it must never decide the panel's size, or the panel would grow into the picture without end.
-        frost = new ImageView(this);
-        frost.setScaleType(ImageView.ScaleType.MATRIX);
-        frost.setVisibility(View.GONE);
-        dock.addView(frost, matchParent());
-        View tint = new View(this);
-        tint.setBackgroundColor(Palette.alpha(Palette.BG, 0.3f));
-        dock.addView(tint, matchParent());
-        View pane = new View(this);
-        pane.setBackground(new Glass(r, Math.max(1f, dp(1)), 1f));
-        dock.addView(pane, matchParent());
+        // Frost, a dark tint and the glass are the panel's background, not its children:
+        // a child that fills its parent asks for the whole screen while the panel is measured,
+        // and the panel would take that height. Only the controls decide how tall it is.
+        dock.setBackground(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{
+                frost, new ColorDrawable(Palette.alpha(Palette.BG, 0.3f)), new Glass(r, Math.max(1f, dp(1)), 1f)}));
 
         LinearLayout inner = new LinearLayout(this);
         inner.setOrientation(LinearLayout.VERTICAL);
@@ -697,7 +691,10 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                 rail.setLayoutParams(rl);
             }
             if (over <= dp(4)) {
-                if (frost.getVisibility() != View.GONE) frost.setVisibility(View.GONE);
+                if (frostOn) {
+                    frostOn = false;
+                    frost.clear();
+                }
                 return;
             }
             float vh = viewfinder.getHeight(), vw = viewfinder.getWidth();
@@ -706,8 +703,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             frostLeft = (dock.getLeft() - vfLeft) / vw;
             frostRight = (dock.getRight() - vfLeft) / vw;
             frostHeight = Math.min(over, dock.getHeight());
-            if (frost.getVisibility() != View.VISIBLE) {
-                frost.setVisibility(View.VISIBLE);
+            if (!frostOn) {
+                frostOn = true;
                 main.removeCallbacks(frostTick);
                 main.post(frostTick);
             }
@@ -716,12 +713,11 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
 
     private float frostFrom, frostTo, frostLeft, frostRight;
     private int frostHeight;
-    private final android.graphics.Matrix frostMatrix = new android.graphics.Matrix();
 
     /** The frost follows the picture a few times a second, from a copy a couple of dozen pixels wide. */
     private final Runnable frostTick = new Runnable() {
         @Override public void run() {
-            if (!opened || !preview.isAvailable() || frost.getVisibility() != View.VISIBLE) return;
+            if (!opened || !preview.isAvailable() || !frostOn) return;
             int vw = viewfinder.getWidth(), vh = viewfinder.getHeight();
             if (vw > 0 && vh > 0) {
                 int bw = 24, bh = Math.max(8, Math.round(24f * vh / vw));
@@ -731,13 +727,7 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                     int y1 = Math.max(y0 + 1, Math.min(bh, Math.round(bh * frostTo)));
                     int x0 = Math.max(0, Math.min(bw - 1, Math.round(bw * frostLeft)));
                     int x1 = Math.max(x0 + 1, Math.min(bw, Math.round(bw * frostRight)));
-                    Bitmap band = Bitmap.createBitmap(tiny, x0, y0, x1 - x0, y1 - y0);
-                    BitmapDrawable d = new BitmapDrawable(getResources(), band);
-                    d.setFilterBitmap(true);
-                    frost.setImageDrawable(d);
-                    // Stretched over the panel's width and only as far down as the picture reaches.
-                    frostMatrix.setScale(frost.getWidth() / (float) band.getWidth(), frostHeight / (float) band.getHeight());
-                    frost.setImageMatrix(frostMatrix);
+                    frost.set(Bitmap.createBitmap(tiny, x0, y0, x1 - x0, y1 - y0), frostHeight);
                 }
             }
             main.postDelayed(this, 150);

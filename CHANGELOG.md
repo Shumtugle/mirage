@@ -1,5 +1,13 @@
 # Changes
 
+## 0.5.2
+
+- The panel really keeps its size now. 0.5.1 blamed the frost alone, but the
+  dark tint and the glass were children that fill their parent, and such a
+  child asks for the whole screen while the panel is measured. Frost, tint
+  and glass are now the panel's background; only the controls decide its
+  height.
+
 ## 0.5.1
 
 - The panel no longer grows over the picture. The frost under its glass was
