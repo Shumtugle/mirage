@@ -65,7 +65,7 @@ import java.util.Locale;
  * around the shutter, and two tabs at the bottom.
  */
 public final class MainActivity extends Activity implements CameraEngine.Listener, Developer.Listener {
-    static final String VERSION = "0.5.0";
+    static final String VERSION = "0.5.1";
 
     private static final int REQ_PERMS = 1;
     private static final String PREF_GRID = "grid";
@@ -524,10 +524,12 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             }
         });
         dock.setClipToOutline(true);
+        // The frost fills the panel but is painted only over the part that lies on the picture;
+        // it must never decide the panel's size, or the panel would grow into the picture without end.
         frost = new ImageView(this);
-        frost.setScaleType(ImageView.ScaleType.FIT_XY);
+        frost.setScaleType(ImageView.ScaleType.MATRIX);
         frost.setVisibility(View.GONE);
-        dock.addView(frost, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 0, Gravity.TOP));
+        dock.addView(frost, matchParent());
         View tint = new View(this);
         tint.setBackgroundColor(Palette.alpha(Palette.BG, 0.3f));
         dock.addView(tint, matchParent());
@@ -703,10 +705,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
             frostTo = (dock.getTop() + over - vfTop) / vh;
             frostLeft = (dock.getLeft() - vfLeft) / vw;
             frostRight = (dock.getRight() - vfLeft) / vw;
-            FrameLayout.LayoutParams fl = (FrameLayout.LayoutParams) frost.getLayoutParams();
-            if (fl.height != over || frost.getVisibility() != View.VISIBLE) {
-                fl.height = over;
-                frost.setLayoutParams(fl);
+            frostHeight = Math.min(over, dock.getHeight());
+            if (frost.getVisibility() != View.VISIBLE) {
                 frost.setVisibility(View.VISIBLE);
                 main.removeCallbacks(frostTick);
                 main.post(frostTick);
@@ -715,6 +715,8 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
     };
 
     private float frostFrom, frostTo, frostLeft, frostRight;
+    private int frostHeight;
+    private final android.graphics.Matrix frostMatrix = new android.graphics.Matrix();
 
     /** The frost follows the picture a few times a second, from a copy a couple of dozen pixels wide. */
     private final Runnable frostTick = new Runnable() {
@@ -733,6 +735,9 @@ public final class MainActivity extends Activity implements CameraEngine.Listene
                     BitmapDrawable d = new BitmapDrawable(getResources(), band);
                     d.setFilterBitmap(true);
                     frost.setImageDrawable(d);
+                    // Stretched over the panel's width and only as far down as the picture reaches.
+                    frostMatrix.setScale(frost.getWidth() / (float) band.getWidth(), frostHeight / (float) band.getHeight());
+                    frost.setImageMatrix(frostMatrix);
                 }
             }
             main.postDelayed(this, 150);

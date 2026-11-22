@@ -1,5 +1,13 @@
 # Changes
 
+## 0.5.1
+
+- The panel no longer grows over the picture. The frost under its glass was
+  as tall as the part of the panel lying on the picture, and the panel took
+  its height from the frost: each taller than the last, until the panel
+  filled the screen. The frost now fills the panel and is only painted over
+  the part that lies on the picture.
+
 ## 0.5.0
 
 - A new look. The viewfinder runs from edge to edge, pressed to the top of
